@@ -1,5 +1,5 @@
 {
-
+  "approvalMode": "ask",
   "autosave": {
     "truncateby": 26500,
     "truncateafter": 33000,

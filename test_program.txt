@@ -1,0 +1,32 @@
+# Complex Python Program
+import math
+
+class Calculator:
+    def __init__(self):
+        self.history = []
+    
+    def add(self, a, b):
+        result = a + b
+        self.history.append(f"{a} + {b} = {result}")
+        return result
+    
+    def circle_area(self, radius):
+        area = math.pi * radius ** 2
+        self.history.append(f"Circle area(r={radius}) = {area:.2f}")
+        return area
+    
+    def fibonacci(self, n):
+        if n <= 1:
+            return n
+        return self.fibonacci(n-1) + self.fibonacci(n-2)
+    
+    def show_history(self):
+        for item in self.history:
+            print(item)
+
+# Test the calculator
+calc = Calculator()
+print(calc.add(5, 3))
+print(calc.circle_area(10))
+print(calc.fibonacci(8))
+calc.show_history()

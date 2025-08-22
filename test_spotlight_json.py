@@ -48,7 +48,7 @@ def analyze_screenshot_json(image_bytes: bytes) -> dict:
     """
     system_prompt = ""  # No system prompt needed
     
-    user_prompt = """You are analyzing a desktop screenshot at 1280×800 pixels. Do not rescale. Origin is top-left (0,0). Return only JSON with an array elements, each with: type, text, center:[x,y] (integers), bounds:[x1,y1,x2,y2] (integers), and confidence (0–1). Include every visible interactive or text element (windows, buttons, inputs, icons, menus, dialogs). Example schema: {elements:[{type:'button',text:'OK',center:[640,742],bounds:[612,728,668,756],confidence:0.93}]}. If unsure, still output your best guess with lower confidence. No prose."""
+    user_prompt = """You are analyzing a desktop screenshot at 800×600 pixels. Do not rescale. Origin is top-left (0,0). Return only JSON with an array elements, each with: type, text, center:[x,y] (integers), bounds:[x1,y1,x2,y2] (integers), and confidence (0–1). Include every visible interactive or text element (windows, buttons, inputs, icons, menus, dialogs). Example schema: {elements:[{type:'button',text:'OK',center:[640,742],bounds:[612,728,668,756],confidence:0.93}]}. If unsure, still output your best guess with lower confidence. No prose."""
 
     try:
         print(f"📡 Analyzing screenshot with arcee-ai/spotlight...")

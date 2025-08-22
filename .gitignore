@@ -28,6 +28,7 @@ screenshot_*.png
 screenshot_*.jpg
 /tmp/screenshot_*
 qmp_screenshot_*
+*.jpg
 
 # Backup files
 *.bak

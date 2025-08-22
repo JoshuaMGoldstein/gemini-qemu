@@ -79,7 +79,7 @@ Example:
 TOTAL_ELEMENTS: 45
 HIGH_DENSITY_AREAS:
 setup_dialog|Dialog with 9 wizard buttons|130,140,620,600|12
-taskbar|Bottom taskbar with multiple icons|0,770,1280,800|8
+taskbar|Bottom taskbar with multiple icons|0,570,800,600|8
 
 IMPORTANT: 
 - Only identify areas with 5+ clustered elements as high-density
@@ -198,7 +198,7 @@ def run_single_call_test():
     print("=" * 60)
     
     # Create partitioner
-    partitioner = AdaptivePartitioner(1280, 800)
+    partitioner = AdaptivePartitioner(800, 600)
     
     # Step 1: Take full screenshot
     print("📸 Taking full screenshot...")

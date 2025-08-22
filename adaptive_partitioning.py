@@ -60,7 +60,7 @@ class ScreenshotPartition:
 class AdaptivePartitioner:
     """Handles intelligent partitioning of screenshots for vision analysis"""
     
-    def __init__(self, screen_width: int = 1280, screen_height: int = 800, 
+    def __init__(self, screen_width: int = 800, screen_height: int = 600, 
                  min_region_size: int = 50):
         self.screen_bounds = BoundingBox(0, 0, screen_width, screen_height)
         self.min_region_size = min_region_size
@@ -249,7 +249,7 @@ def parse_density_analysis(vision_response: str) -> Tuple[int, List[HighDensityA
     TOTAL_ELEMENTS: 45
     HIGH_DENSITY_AREAS:
     setup_dialog|Puppy Setup wizard buttons|130,140,620,600|12
-    taskbar|Bottom taskbar with icons|0,770,1280,800|8
+    taskbar|Bottom taskbar with icons|0,570,800,600|8
     
     Returns:
         (total_elements, list_of_high_density_areas)
@@ -289,14 +289,14 @@ def parse_density_analysis(vision_response: str) -> Tuple[int, List[HighDensityA
 # Example usage and testing
 if __name__ == "__main__":
     # Test with Puppy Linux desktop scenario
-    partitioner = AdaptivePartitioner(1280, 800)
+    partitioner = AdaptivePartitioner(800, 600)
     
     # Simulated high-density areas from vision analysis
     high_density_areas = [
         HighDensityArea("setup_dialog", "Puppy Setup wizard buttons", 
                        BoundingBox(130, 140, 620, 600), 12),
         HighDensityArea("taskbar", "Bottom taskbar with icons",
-                       BoundingBox(0, 770, 1280, 800), 8)
+                       BoundingBox(0, 570, 800, 600), 8)
     ]
     
     # Generate partitions

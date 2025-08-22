@@ -67,7 +67,7 @@ cat << 'EOF'
   },
   {
     "name": "send_keyboard",
-    "description": "Send keyboard input (text typing and key combinations) to the VM",
+    "description": "Send keyboard input (text typing and key combinations) to the VM. CRITICAL: Use exact JSON format with 'action' field BEFORE 'text'/'key' fields.",
     "parameters": {
       "type": "object",
       "properties": {
@@ -77,31 +77,35 @@ cat << 'EOF'
           "enum": ["local", "ubuntu-vm", "test-vm"],
           "default": "local"
         },
+        "text": {
+          "type": "string",
+          "description": "Simple text to type (alternative to actions array). Use this for basic text input."
+        },
         "actions": {
           "type": "array",
-          "description": "Array of keyboard actions to perform",
+          "description": "Array of keyboard actions. REQUIRED FORMAT: [{\"action\": \"type\", \"text\": \"hello\"}, {\"action\": \"key\", \"key\": \"Return\"}]. Always put 'action' field FIRST.",
           "items": {
             "type": "object",
             "properties": {
               "action": {
                 "type": "string",
-                "description": "Type of keyboard action",
+                "description": "MUST be exactly 'type' or 'key' (complete words only, no truncation)",
                 "enum": ["type", "key"]
               },
               "text": {
                 "type": "string",
-                "description": "Text to type (required when action=type)"
+                "description": "Text to type (required when action='type'). Supports #comments and all punctuation."
               },
               "key": {
                 "type": "string",
-                "description": "Key or key combination to press (required when action=key). Examples: enter, ctrl+c, alt+tab"
+                "description": "Key combination (required when action='key'). Examples: 'Return', 'ctrl+s', 'alt+f', 'f1' (lowercase for function keys)"
               }
             },
             "required": ["action"]
           }
         }
       },
-      "required": ["actions"]
+      "required": []
     }
   }
 ]

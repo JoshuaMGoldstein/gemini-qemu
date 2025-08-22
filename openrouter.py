@@ -6,16 +6,31 @@ from typing import Any, Dict, List, Optional
 import requests
 from dotenv import load_dotenv
 
+# Load .env file from current directory if it exists
 load_dotenv()
-
 
 DEFAULT_BASE_URL = os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 
 
 def _headers() -> Dict[str, str]:
-    api_key = os.environ.get("LLMVM_OPENROUTER_API_KEY") or os.environ.get("OPENROUTER_API_KEY")
+    # Try multiple sources for API key in order of preference:
+    # 1. LLMVM_OPENROUTER_API_KEY (legacy)
+    # 2. OPENROUTER_API_KEY (standard)
+    # 3. Check if we can find it in common environment locations
+    api_key = (
+        os.environ.get("LLMVM_OPENROUTER_API_KEY") or 
+        os.environ.get("OPENROUTER_API_KEY") or
+        os.environ.get("OPENROUTER_KEY")  # Alternative common name
+    )
+    
     if not api_key:
-        raise RuntimeError("LLMVM_OPENROUTER_API_KEY or OPENROUTER_API_KEY not set. Put it in .env or env.")
+        raise RuntimeError(
+            "OpenRouter API key not found. Please set one of:\n"
+            "- OPENROUTER_API_KEY in environment\n" 
+            "- LLMVM_OPENROUTER_API_KEY in environment\n"
+            "- OPENROUTER_API_KEY in .env file\n"
+            "- Export OPENROUTER_API_KEY=your_key_here"
+        )
     site_url = os.environ.get("OPENROUTER_SITE_URL", "http://localhost")
     app_name = os.environ.get("OPENROUTER_APP_NAME", "llm-vm-controller")
     return {
