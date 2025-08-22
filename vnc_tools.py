@@ -55,6 +55,867 @@ def _compress_png_to_jpeg(image_bytes: bytes, quality: int = 85) -> bytes:
     png_img.save(jpeg_buffer, format='JPEG', quality=quality, optimize=True)
     return jpeg_buffer.getvalue()
 
+def _call_ollama_vision(image_bytes: bytes, width: int, height: int) -> dict:
+    """Call Ollama vision model (llava) for GUI element detection with normalized coordinates"""
+    try:
+        import requests
+        import base64
+        
+        print(f"🔍 Attempting Ollama llava vision detection for {width}x{height} image...", file=sys.stderr)
+        
+        # Convert image to base64
+        image_b64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Prepare the prompt with normalized coordinates requirement
+        prompt = f"""You see ONE desktop screenshot. Output TSV format ONLY:
+
+SIZE  {width}  {height}
+PT  close  0.975  0.025  0.9
+PT  minimize  0.925  0.025  0.9
+PT  maximize  0.950  0.025  0.9
+PT  menu  0.050  0.950  0.8
+PT  firefox  0.100  0.100  0.7
+
+Rules:
+- First line MUST be: SIZE  {width}  {height}
+- Each PT line: PT [label] [x_norm] [y_norm] [confidence]
+- x_norm, y_norm are floats in [0,1] (0=left/top, 1=right/bottom)
+- Common labels: close, minimize, maximize, menu, start, firefox, chrome, folder, terminal, settings, trash
+- Output up to 20 PT lines for clickable elements you see
+- No other text allowed"""
+
+        # Call Ollama API with strict settings
+        response = requests.post(
+            'http://localhost:11434/api/generate',
+            json={
+                'model': 'llava',
+                'prompt': prompt,
+                'images': [image_b64],
+                'stream': False,
+                'temperature': 0.0,  # Zero temperature for consistency
+                'num_predict': 300,  # Limit response length
+            },
+            timeout=30
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            content = result.get('response', '')
+            print(f"🔍 Ollama response length: {len(content)} chars", file=sys.stderr)
+            # Clean up markdown code blocks if present
+            if '```' in content:
+                content = content.replace('```', '').strip()
+            print(f"🔍 Ollama raw response preview: {repr(content[:300])}", file=sys.stderr)
+            return {"success": True, "content": content, "width": width, "height": height}
+        else:
+            print(f"❌ Ollama API error: {response.status_code}", file=sys.stderr)
+            return {"success": False, "error": f"API error: {response.status_code}"}
+            
+    except Exception as e:
+        print(f"❌ Ollama error: {e}", file=sys.stderr)
+        return {"success": False, "error": str(e)}
+
+def _norm_to_px(px: float, py: float, W: int, H: int) -> tuple:
+    """Convert normalized coordinates to pixels with bounds clamping"""
+    x = int(round(px * (W - 1)))
+    y = int(round(py * (H - 1)))
+    x = max(0, min(W - 1, x))
+    y = max(0, min(H - 1, y))
+    return x, y
+
+def _parse_ollama_result(result: dict) -> str:
+    """Parse Ollama TSV output with SIZE gate validation and normalized coordinates"""
+    try:
+        content = result.get("content", "")
+        width = result.get("width", 800)
+        height = result.get("height", 600)
+        
+        lines = content.strip().split('\n')
+        size_ok = False
+        points = []
+        
+        for line in lines:
+            parts = line.strip().split()
+            if not parts:
+                continue
+                
+            # Check SIZE gate
+            if parts[0] == "SIZE":
+                if len(parts) >= 3:
+                    try:
+                        w, h = int(parts[1]), int(parts[2])
+                        size_ok = (w == width and h == height)
+                        print(f"🔍 SIZE gate: expected {width}x{height}, got {w}x{h}, valid: {size_ok}", file=sys.stderr)
+                    except:
+                        pass
+                continue
+                
+            # Parse PT lines
+            if parts[0] == "PT" and len(parts) >= 5:
+                try:
+                    label = parts[1]
+                    px = float(parts[2])
+                    py = float(parts[3])
+                    conf = float(parts[4]) if len(parts) > 4 else 0.9
+                    
+                    # Validate normalized coordinates are in [0,1]
+                    if not (0.0 <= px <= 1.0 and 0.0 <= py <= 1.0):
+                        print(f"🔍 Dropping OOB point: {label} at ({px},{py})", file=sys.stderr)
+                        continue
+                        
+                    # Convert to pixel coordinates
+                    x, y = _norm_to_px(px, py, width, height)
+                    points.append({
+                        "label": label,
+                        "x": x,
+                        "y": y,
+                        "conf": conf
+                    })
+                    print(f"🔍 Parsed {label}: normalized ({px:.3f},{py:.3f}) -> pixels ({x},{y})", file=sys.stderr)
+                    
+                except (ValueError, IndexError) as e:
+                    print(f"🔍 Parse error on PT line '{line}': {e}", file=sys.stderr)
+                    continue
+        
+        # If SIZE gate failed, retry once or fall back
+        if not size_ok:
+            print("⚠️ SIZE gate failed, Ollama may be confused about dimensions", file=sys.stderr)
+            # Could retry here with same prompt, but for now just warn
+        
+        # Format results
+        if points:
+            elements = []
+            for pt in points:
+                # Map common labels to more descriptive types
+                label_map = {
+                    'close': 'close_button',
+                    'minimize': 'minimize_button', 
+                    'maximize': 'maximize_button',
+                    'min': 'minimize_button',
+                    'max': 'maximize_button'
+                }
+                label = label_map.get(pt['label'], pt['label'])
+                elements.append(f"{label}:{pt['label']} - click ({pt['x']}, {pt['y']})")
+            return "\n".join(elements)
+        else:
+            return "No valid GUI elements detected"
+            
+    except Exception as e:
+        print(f"❌ Failed to parse Ollama result: {e}", file=sys.stderr)
+        return "Failed to parse Ollama output"
+
+def _remove_duplicate_elements(parsed_content_list):
+    """Remove duplicate elements from overlapping quadrant regions"""
+    import sys
+    
+    # Group elements by approximate location and content similarity
+    POSITION_TOLERANCE = 0.05  # 5% screen tolerance for same position
+    TEXT_SIMILARITY_THRESHOLD = 0.7  # 70% similarity for text content
+    
+    unique_elements = []
+    
+    for element in parsed_content_list:
+        bbox = element.get('bbox', [])
+        content = element.get('content', '')
+        
+        if len(bbox) < 4:
+            unique_elements.append(element)
+            continue
+            
+        # Check if this element is a duplicate of an existing one
+        is_duplicate = False
+        
+        for existing in unique_elements:
+            existing_bbox = existing.get('bbox', [])
+            existing_content = existing.get('content', '')
+            
+            if len(existing_bbox) < 4:
+                continue
+                
+            # Check position similarity
+            pos_diff = abs(bbox[0] - existing_bbox[0]) + abs(bbox[1] - existing_bbox[1])
+            if pos_diff < POSITION_TOLERANCE:
+                # Check content similarity
+                if content == existing_content:
+                    # Exact match - definitely duplicate
+                    is_duplicate = True
+                    break
+                elif content and existing_content:
+                    # Check if one is substring of other (partial overlap case)
+                    if content in existing_content or existing_content in content:
+                        # Keep the longer one
+                        if len(content) > len(existing_content):
+                            unique_elements.remove(existing)
+                            break
+                        else:
+                            is_duplicate = True
+                            break
+        
+        if not is_duplicate:
+            unique_elements.append(element)
+    
+    print(f"🔍 Deduplication: {len(parsed_content_list)} -> {len(unique_elements)} elements", file=sys.stderr)
+    return unique_elements
+
+def _reconstruct_cross_quadrant_text(parsed_content_list, width, height):
+    """Reconstruct text elements that may span across quadrant boundaries"""
+    import sys
+    
+    # Separate text and non-text elements
+    text_elements = [e for e in parsed_content_list if e.get('type') == 'text']
+    non_text_elements = [e for e in parsed_content_list if e.get('type') != 'text']
+    
+    # Group text elements by line (similar Y coordinates)
+    LINE_TOLERANCE = 0.08  # 8% of screen height tolerance for same line - increased for better line detection
+    text_lines = []
+    
+    for element in text_elements:
+        bbox = element.get('bbox', [])
+        if len(bbox) >= 4:
+            y_center = (bbox[1] + bbox[3]) / 2
+            
+            # Find existing line this element belongs to
+            found_line = None
+            for line in text_lines:
+                line_y = line['y_center']
+                if abs(y_center - line_y) < LINE_TOLERANCE:
+                    found_line = line
+                    break
+            
+            if found_line:
+                found_line['elements'].append(element)
+                # Update line Y to average
+                found_line['y_center'] = sum(e['bbox'][1] + e['bbox'][3] for e in found_line['elements']) / (2 * len(found_line['elements']))
+            else:
+                text_lines.append({
+                    'y_center': y_center,
+                    'elements': [element]
+                })
+    
+    # Reconstruct each line by sorting elements left-to-right and merging adjacent text
+    reconstructed_text = []
+    
+    for line in text_lines:
+        # Sort elements by X coordinate
+        line['elements'].sort(key=lambda e: e['bbox'][0] if len(e['bbox']) >= 4 else 0)
+        
+        # Group adjacent elements (within same quadrant boundary or very close)
+        ADJACENCY_TOLERANCE = 0.15  # 15% of screen width - increased to capture longer gaps
+        merged_elements = []
+        current_group = []
+        
+        for element in line['elements']:
+            if not current_group:
+                current_group = [element]
+            else:
+                # Check if this element is adjacent to the last one in current group
+                last_element = current_group[-1]
+                last_x_end = last_element['bbox'][2] if len(last_element['bbox']) >= 4 else 0
+                current_x_start = element['bbox'][0] if len(element['bbox']) >= 4 else 0
+                
+                gap = current_x_start - last_x_end
+                
+                if gap < ADJACENCY_TOLERANCE:
+                    # Adjacent - add to current group
+                    current_group.append(element)
+                else:
+                    # Not adjacent - finalize current group and start new one
+                    if len(current_group) > 1:
+                        merged_element = _merge_text_elements(current_group)
+                        merged_elements.append(merged_element)
+                    else:
+                        merged_elements.extend(current_group)
+                    current_group = [element]
+        
+        # Don't forget the last group
+        if current_group:
+            if len(current_group) > 1:
+                merged_element = _merge_text_elements(current_group)
+                merged_elements.append(merged_element)
+            else:
+                merged_elements.extend(current_group)
+        
+        reconstructed_text.extend(merged_elements)
+    
+    print(f"🔍 Text reconstruction: {len(text_elements)} -> {len(reconstructed_text)} elements", file=sys.stderr)
+    
+    # Return combined list
+    return reconstructed_text + non_text_elements
+
+def _merge_text_elements(elements):
+    """Merge multiple text elements into a single element"""
+    if len(elements) <= 1:
+        return elements[0] if elements else None
+    
+    # Sort by X coordinate
+    elements.sort(key=lambda e: e['bbox'][0] if len(e['bbox']) >= 4 else 0)
+    
+    # Combine content with spaces
+    combined_content = ' '.join(e.get('content', '') for e in elements if e.get('content'))
+    
+    # Calculate combined bounding box
+    min_x = min(e['bbox'][0] for e in elements if len(e['bbox']) >= 4)
+    min_y = min(e['bbox'][1] for e in elements if len(e['bbox']) >= 4)
+    max_x = max(e['bbox'][2] for e in elements if len(e['bbox']) >= 4)
+    max_y = max(e['bbox'][3] for e in elements if len(e['bbox']) >= 4)
+    
+    # Create merged element based on first element
+    merged_element = elements[0].copy()
+    merged_element['content'] = combined_content
+    merged_element['bbox'] = [min_x, min_y, max_x, max_y]
+    merged_element['quadrant'] = f"merged({','.join(e.get('quadrant', '') for e in elements)})"
+    
+    return merged_element
+
+def _call_omniparser_replicate(image_bytes: bytes) -> dict:
+    """Call OmniParser v2.0 via Replicate API"""
+    try:
+        import replicate
+        import base64
+        import io
+        import json
+        from PIL import Image
+        from pathlib import Path
+        
+        print("🔍 Using Replicate API for OmniParser v2.0...", file=sys.stderr)
+        
+        # Load configuration
+        script_dir = Path(__file__).parent
+        config_path = script_dir / "vm_config.json"
+        
+        try:
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            replicate_config = config.get('replicate', {})
+        except Exception as e:
+            print(f"⚠️ Failed to load config, using defaults: {e}", file=sys.stderr)
+            replicate_config = {
+                "model": "microsoft/omniparser-v2:49cf3d41b8d3aca1360514e83be4c97131ce8f0d99abfc365526d8384caa88df",
+                "api_key_env": "REPLICATE_API_TOKEN",
+                "default_params": {"imgsz": 640, "box_threshold": 0.05, "iou_threshold": 0.1}
+            }
+        
+        # Get API key from environment variable
+        import os
+        api_key_env = replicate_config.get('api_key_env', 'REPLICATE_API_TOKEN')
+        api_key = os.getenv(api_key_env)
+        
+        if not api_key:
+            return {"success": False, "error": f"Replicate API key not found in environment variable '{api_key_env}'"}
+        
+        os.environ["REPLICATE_API_TOKEN"] = api_key
+        
+        # Process image for 5-call system: full image + 4 quadrants
+        import tempfile
+        import concurrent.futures
+        import threading
+        
+        image = Image.open(io.BytesIO(image_bytes))
+        width, height = image.size
+        
+        # Convert to RGB if needed
+        if image.mode != 'RGB':
+            image = image.convert('RGB')
+        
+        print(f"🔍 Using 5-call system: full image + 4 quadrants for {width}x{height} image", file=sys.stderr)
+        
+        # Get model from config
+        model = replicate_config.get('model', 'microsoft/omniparser-v2:49cf3d41b8d3aca1360514e83be4c97131ce8f0d99abfc365526d8384caa88df')
+        
+        # Prepare 5 images: full + 4 quadrants with overlap
+        OVERLAP = 50  # pixels overlap to catch UI elements spanning boundaries
+        images_to_process = [
+            ("full_image", image, (0, 0)),
+            ("top_left", image.crop((0, 0, width//2 + OVERLAP, height//2 + OVERLAP)), (0, 0)),
+            ("top_right", image.crop((width//2 - OVERLAP, 0, width, height//2 + OVERLAP)), (width//2 - OVERLAP, 0)),
+            ("bottom_left", image.crop((0, height//2 - OVERLAP, width//2 + OVERLAP, height)), (0, height//2 - OVERLAP)),
+            ("bottom_right", image.crop((width//2 - OVERLAP, height//2 - OVERLAP, width, height)), (width//2 - OVERLAP, height//2 - OVERLAP))
+        ]
+        
+        def call_replicate_api(name, img, offset):
+            """Call Replicate API for a single image"""
+            try:
+                with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                    img.save(temp_file, format='PNG')
+                    temp_path = temp_file.name
+                
+                try:
+                    print(f"🔍 Starting {name} API call...", file=sys.stderr)
+                    with open(temp_path, 'rb') as f:
+                        result = replicate.run(
+                            model,
+                            input={
+                                "image": f,
+                                "imgsz": 640,
+                                "box_threshold": 0.05,
+                                "iou_threshold": 0.1
+                            }
+                        )
+                    print(f"🔍 Completed {name} API call", file=sys.stderr)
+                    return (name, result, offset, img.size)
+                finally:
+                    import os
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+            except Exception as e:
+                print(f"❌ Error in {name} API call: {e}", file=sys.stderr)
+                return (name, None, offset, img.size)
+        
+        # Execute 5 API calls with staggered start to avoid rate limiting
+        import time
+        start_time = time.time()
+        print("🔍 Starting 5 parallel Replicate API calls with 0.5s delays...", file=sys.stderr)
+        
+        # Submit all futures with small delays between submissions
+        with concurrent.futures.ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for i, (name, img, offset) in enumerate(images_to_process):
+                # Add 0.5 second delay between each submission
+                if i > 0:
+                    time.sleep(0.5)
+                future = executor.submit(call_replicate_api, name, img, offset)
+                futures.append((future, name))
+                print(f"🔍 Submitted call {i+1}/5: {name}", file=sys.stderr)
+            
+            submit_time = time.time()
+            print(f"🔍 All 5 API calls submitted with delays in {submit_time - start_time:.2f}s", file=sys.stderr)
+            
+            # Collect results as they complete
+            api_results = {}
+            for future, name in futures:
+                name_result, result, offset, img_size = future.result()
+                api_results[name_result] = (result, offset, img_size)
+        
+        total_api_time = time.time() - start_time
+        print(f"🔍 All 5 API calls completed in {total_api_time:.2f}s", file=sys.stderr)
+        
+        # Process results from all 5 API calls
+        print("🔍 Processing results from 5 API calls...", file=sys.stderr)
+        
+        # Separate full image results from quadrant results
+        full_image_result = api_results.get('full_image', (None, None, None))[0]
+        
+        # Parse full image for text (like the old system)
+        full_text_elements = []
+        if full_image_result and isinstance(full_image_result, dict):
+            elements_str = full_image_result.get('elements', '')
+            if elements_str:
+                import ast
+                lines = elements_str.strip().split('\n')
+                for line in lines:
+                    if line.strip() and ':' in line:
+                        try:
+                            parts = line.split(':', 1)
+                            if len(parts) >= 2:
+                                dict_str = parts[1].strip()
+                                element_dict = ast.literal_eval(dict_str)
+                                
+                                # Only keep text elements from full image
+                                if element_dict.get('type') == 'text':
+                                    full_text_elements.append({
+                                        'type': 'text',
+                                        'content': element_dict.get('content', ''),
+                                        'bbox': element_dict.get('bbox', [0, 0, 1, 1]),
+                                        'interactivity': False,
+                                        'source': 'full_image_text',
+                                        'quadrant': 'full_image'
+                                    })
+                        except:
+                            continue
+        
+        print(f"🔍 Full image: {len(full_text_elements)} text elements", file=sys.stderr)
+        
+        # Parse quadrant results for UI elements
+        all_ui_elements = []
+        for quad_name in ['top_left', 'top_right', 'bottom_left', 'bottom_right']:
+            quad_data = api_results.get(quad_name)
+            if not quad_data or not quad_data[0]:
+                continue
+                
+            quad_result, (offset_x, offset_y), (quad_width, quad_height) = quad_data
+            
+            if isinstance(quad_result, dict):
+                elements_str = quad_result.get('elements', '')
+                if elements_str:
+                    import ast
+                    lines = elements_str.strip().split('\n')
+                    for line in lines:
+                        if line.strip() and ':' in line:
+                            try:
+                                parts = line.split(':', 1)
+                                if len(parts) >= 2:
+                                    dict_str = parts[1].strip()
+                                    element_dict = ast.literal_eval(dict_str)
+                                    
+                                    # Only keep icon elements from quadrants
+                                    if element_dict.get('type') == 'icon':
+                                        # Convert quadrant coordinates to full image coordinates
+                                        bbox = element_dict.get('bbox', [0, 0, 1, 1])
+                                        x1, y1, x2, y2 = bbox
+                                        
+                                        # Convert from quadrant ratios to full image ratios
+                                        full_x1 = (x1 * quad_width + offset_x) / width
+                                        full_y1 = (y1 * quad_height + offset_y) / height
+                                        full_x2 = (x2 * quad_width + offset_x) / width  
+                                        full_y2 = (y2 * quad_height + offset_y) / height
+                                        
+                                        all_ui_elements.append({
+                                            'type': 'icon',
+                                            'content': element_dict.get('content', ''),
+                                            'bbox': [full_x1, full_y1, full_x2, full_y2],
+                                            'interactivity': True,
+                                            'source': 'quadrant_ui',
+                                            'quadrant': quad_name
+                                        })
+                            except:
+                                continue
+        
+        print(f"🔍 Quadrants: {len(all_ui_elements)} UI elements", file=sys.stderr)
+        
+        # Combine results like the old dual approach
+        parsed_content_list = full_text_elements + all_ui_elements
+        
+        print(f"🔍 Total: {len(parsed_content_list)} elements", file=sys.stderr)
+        
+        return {
+            "success": True,
+            "result": {
+                "parsed_content_list": parsed_content_list,
+                "coordinates": {},
+                "labeled_image": full_image_result.get('img', '') if full_image_result else '',
+                "width": width,
+                "height": height
+            }
+        }
+            
+    except Exception as e:
+        print(f"❌ Replicate API error: {e}", file=sys.stderr)
+        return {"success": False, "error": str(e)}
+
+def _call_omniparser_vision(image_bytes: bytes) -> dict:
+    """Call OmniParser v2.0 for GUI element detection using local installation"""
+    try:
+        import tempfile
+        import os
+        import sys
+        import io
+        from pathlib import Path
+        from PIL import Image
+        import torch
+        
+        print("🔍 Attempting OmniParser v2.0 local detection...", file=sys.stderr)
+        
+        # Get script directory and OmniParser path
+        script_dir = Path(__file__).parent
+        omniparser_dir = script_dir / "OmniParser"
+        weights_dir = omniparser_dir / "weights"
+        
+        if not omniparser_dir.exists():
+            print(f"❌ OmniParser directory not found at {omniparser_dir}", file=sys.stderr)
+            return {"success": False, "error": "OmniParser directory not found"}
+        
+        if not weights_dir.exists():
+            print(f"❌ OmniParser weights not found at {weights_dir}", file=sys.stderr)
+            return {"success": False, "error": "OmniParser weights not found"}
+        
+        # Add OmniParser to Python path
+        sys.path.insert(0, str(omniparser_dir))
+        
+        try:
+            from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
+            
+            print("🔍 Loading OmniParser models...", file=sys.stderr)
+            
+            # Workaround for Florence2 _supports_sdpa compatibility issue
+            import transformers
+            def patch_florence2_model(model):
+                """Add missing _supports_sdpa attribute to Florence2 models"""
+                if not hasattr(model, '_supports_sdpa'):
+                    model._supports_sdpa = False
+                # Also patch any nested modules that might need it
+                for module in model.modules():
+                    if not hasattr(module, '_supports_sdpa'):
+                        module._supports_sdpa = False
+                return model
+            
+            # Initialize models (following gradio_demo.py pattern)
+            yolo_model = get_yolo_model(model_path=str(weights_dir / 'icon_detect' / 'model.pt'))
+            caption_model_processor = get_caption_model_processor(
+                model_name="florence2", 
+                model_name_or_path=str(weights_dir / 'icon_caption_florence')
+            )
+            
+            # Apply Florence2 compatibility patch
+            if 'model' in caption_model_processor:
+                patch_florence2_model(caption_model_processor['model'])
+                print("🔧 Applied Florence2 compatibility patch", file=sys.stderr)
+            
+            print("🔍 Models loaded, processing image...", file=sys.stderr)
+            
+            # Convert bytes to PIL Image
+            image = Image.open(io.BytesIO(image_bytes))
+            width, height = image.size
+            
+            print("🔍 Using dual approach: full-image text detection + 4-quadrant UI detection...", file=sys.stderr)
+            
+            # PHASE 1: Full-image text detection for complete lines
+            print("🔍 Phase 1: Full-image text detection...", file=sys.stderr)
+            
+            # Run OCR on full image for complete text lines
+            (full_text, full_ocr_bbox), _ = check_ocr_box(
+                image, 
+                display_img=False, 
+                output_bb_format='xyxy', 
+                easyocr_args={'text_threshold': 0.3}, 
+                use_paddleocr=False
+            )
+            
+            # Convert full-image OCR results to text elements
+            full_text_elements = []
+            if full_text and full_ocr_bbox:
+                for i, (text_content, bbox) in enumerate(zip(full_text, full_ocr_bbox)):
+                    if text_content.strip():  # Only non-empty text
+                        # Convert pixel coordinates to ratios
+                        x1, y1, x2, y2 = bbox
+                        full_text_elements.append({
+                            'type': 'text',
+                            'bbox': [x1/width, y1/height, x2/width, y2/height],
+                            'interactivity': False,
+                            'content': text_content.strip(),
+                            'source': 'full_image_ocr',
+                            'quadrant': 'full_image'
+                        })
+            
+            print(f"🔍 Phase 1 result: {len(full_text_elements)} complete text elements", file=sys.stderr)
+            
+            # PHASE 2: 4-quadrant UI element detection for precise clicking
+            print("🔍 Phase 2: 4-quadrant UI element detection...", file=sys.stderr)
+            
+            # Partition image into 4 overlapping quadrants for UI elements only
+            OVERLAP = 50  # pixels overlap to catch UI elements spanning boundaries
+            quadrants = [
+                ("top_left", image.crop((0, 0, width//2 + OVERLAP, height//2 + OVERLAP)), (0, 0)),
+                ("top_right", image.crop((width//2 - OVERLAP, 0, width, height//2 + OVERLAP)), (width//2 - OVERLAP, 0)),
+                ("bottom_left", image.crop((0, height//2 - OVERLAP, width//2 + OVERLAP, height)), (0, height//2 - OVERLAP)),
+                ("bottom_right", image.crop((width//2 - OVERLAP, height//2 - OVERLAP, width, height)), (width//2 - OVERLAP, height//2 - OVERLAP))
+            ]
+            
+            all_ui_elements = []
+            all_coordinates = {}
+            element_count = 0
+            
+            # Process each quadrant for UI elements only
+            for quad_name, quad_image, (offset_x, offset_y) in quadrants:
+                print(f"🔍 Processing {quad_name} quadrant...", file=sys.stderr)
+                
+                # Calculate overlay ratio and drawing config for this quadrant
+                box_overlay_ratio = quad_image.size[0] / 3200
+                draw_bbox_config = {
+                    'text_scale': 0.8 * box_overlay_ratio,
+                    'text_thickness': max(int(2 * box_overlay_ratio), 1),
+                    'text_padding': max(int(3 * box_overlay_ratio), 1),
+                    'thickness': max(int(3 * box_overlay_ratio), 1),
+                }
+                
+                # Run minimal OCR for SOM compatibility but focus on UI elements
+                (quad_text, quad_ocr_bbox), _ = check_ocr_box(
+                    quad_image, 
+                    display_img=False, 
+                    output_bb_format='xyxy', 
+                    easyocr_args={'text_threshold': 0.9},  # Very high threshold - we don't want text, just UI elements
+                    use_paddleocr=False
+                )
+                
+                # Get SOM labeled image and parsed content for quadrant (UI elements focused)
+                quad_dino_labeled_img, quad_label_coordinates, quad_parsed_content_list = get_som_labeled_img(
+                    quad_image, 
+                    yolo_model, 
+                    BOX_TRESHOLD=0.05, 
+                    output_coord_in_ratio=True, 
+                    ocr_bbox=quad_ocr_bbox or [],  # Provide OCR boxes for compatibility
+                    draw_bbox_config=draw_bbox_config, 
+                    caption_model_processor=caption_model_processor, 
+                    ocr_text=quad_text or [],  # Provide OCR text for compatibility
+                    use_local_semantics=True, 
+                    iou_threshold=0.7, 
+                    scale_img=False, 
+                    batch_size=128
+                )
+                
+                # Filter out any text elements from quadrant processing - we only want icons
+                quad_parsed_content_list = [e for e in quad_parsed_content_list if e.get('type') == 'icon']
+                
+                # Adjust coordinates back to full image space and add quadrant info
+                for i, element in enumerate(quad_parsed_content_list):
+                    # Adjust bbox coordinates
+                    if 'bbox' in element:
+                        bbox = element['bbox']
+                        # Convert from quadrant ratios to full image ratios
+                        quad_width, quad_height = quad_image.size
+                        full_x1 = (bbox[0] * quad_width + offset_x) / width
+                        full_y1 = (bbox[1] * quad_height + offset_y) / height  
+                        full_x2 = (bbox[2] * quad_width + offset_x) / width
+                        full_y2 = (bbox[3] * quad_height + offset_y) / height
+                        element['bbox'] = [full_x1, full_y1, full_x2, full_y2]
+                        element['quadrant'] = quad_name
+                    
+                    all_ui_elements.append(element)
+                
+                # Adjust label coordinates
+                for key, coords in quad_label_coordinates.items():
+                    global_key = f"{quad_name}_{key}"
+                    # Convert quadrant coordinates to full image coordinates
+                    quad_width, quad_height = quad_image.size
+                    full_coords = [
+                        (coords[0] * quad_width + offset_x) / width,
+                        (coords[1] * quad_height + offset_y) / height,
+                        coords[2] * quad_width / width,  # width ratio
+                        coords[3] * quad_height / height  # height ratio
+                    ]
+                    all_coordinates[global_key] = full_coords
+                
+                element_count += len(quad_parsed_content_list)
+                print(f"🔍 {quad_name}: found {len(quad_parsed_content_list)} UI elements", file=sys.stderr)
+            
+            print(f"🔍 Phase 2 result: {element_count} total UI elements from 4 quadrants", file=sys.stderr)
+            
+            # Remove duplicate UI elements from overlapping regions
+            print("🔍 Removing UI element duplicates from overlapping regions...", file=sys.stderr)
+            deduplicated_ui_elements = _remove_duplicate_elements(all_ui_elements)
+            
+            # Combine full-image text with deduplicated UI elements
+            print("🔍 Combining full-image text with quadrant UI elements...", file=sys.stderr)
+            all_elements = full_text_elements + deduplicated_ui_elements
+            
+            # No need for complex text reconstruction since we got complete text from full image
+            reconstructed_content = all_elements
+            
+            # Use the full image as the labeled image (we could composite quadrants later if needed)
+            dino_labeled_img = ""  # Placeholder
+            label_coordinates = all_coordinates
+            parsed_content_list = reconstructed_content
+            
+            print(f"🔍 OmniParser detected {len(parsed_content_list)} elements", file=sys.stderr)
+            print(f"🔍 RAW OMNIPARSER OUTPUT:", file=sys.stderr)
+            print(f"🔍 dino_labeled_img type: {type(dino_labeled_img)}", file=sys.stderr)
+            print(f"🔍 label_coordinates type: {type(label_coordinates)}, content: {label_coordinates}", file=sys.stderr)
+            print(f"🔍 parsed_content_list type: {type(parsed_content_list)}, content: {parsed_content_list}", file=sys.stderr)
+            
+            return {
+                "success": True, 
+                "result": {
+                    "labeled_image": dino_labeled_img,
+                    "coordinates": label_coordinates,
+                    "parsed_content_list": parsed_content_list
+                }
+            }
+                
+        except ImportError as e:
+            print(f"❌ Failed to import OmniParser modules: {e}", file=sys.stderr)
+            return {"success": False, "error": f"Failed to import OmniParser modules: {e}"}
+        finally:
+            # Remove from Python path
+            if str(omniparser_dir) in sys.path:
+                sys.path.remove(str(omniparser_dir))
+                
+    except Exception as e:
+        print(f"❌ OmniParser error: {e}", file=sys.stderr)
+        return {"success": False, "error": str(e)}
+
+def _parse_omniparser_result(result, width=800, height=600) -> str:
+    """Parse OmniParser output into clickable elements format with proper pixel coordinates"""
+    try:
+        elements = []
+        
+        # New format from our updated OmniParser function
+        if isinstance(result, dict) and "parsed_content_list" in result:
+            parsed_content_list = result["parsed_content_list"]
+            coordinates = result.get("coordinates", [])
+            
+            print(f"🔍 Parsing {len(parsed_content_list)} OmniParser elements", file=sys.stderr)
+            
+            for i, element in enumerate(parsed_content_list):
+                element_type = element.get('type', 'unknown')
+                content = element.get('content', f'{element_type}_{i}')
+                
+                # Get coordinates from element bbox if available
+                bbox = element.get('bbox')
+                if bbox and len(bbox) >= 4:
+                    # bbox is in ratio format [x1, y1, x2, y2], convert to pixels
+                    x1, y1, x2, y2 = bbox[:4]
+                    center_x_ratio = (x1 + x2) / 2
+                    center_y_ratio = (y1 + y2) / 2
+                    
+                    # Convert to pixel coordinates
+                    center_x_px = int(center_x_ratio * width)
+                    center_y_px = int(center_y_ratio * height)
+                    
+                    # Create clickable element description with pixel coordinates
+                    if element_type == 'text':
+                        desc = f"text:{content} - click ({center_x_px}, {center_y_px})"
+                    elif element_type == 'icon':
+                        desc = f"icon:{content} - click ({center_x_px}, {center_y_px})"
+                    else:
+                        desc = f"{element_type}:{content} - click ({center_x_px}, {center_y_px})"
+                    
+                    elements.append(desc)
+                    print(f"🔍 Element {i}: {desc} (ratio: {center_x_ratio:.3f}, {center_y_ratio:.3f})", file=sys.stderr)
+                else:
+                    # No coordinates available
+                    desc = f"{element_type}:{content} - (no coordinates)"
+                    elements.append(desc)
+                    print(f"🔍 Element {i}: {desc}", file=sys.stderr)
+            
+            return "\n".join(elements)
+        
+        # Fallback for old format
+        elif isinstance(result, (tuple, list)) and len(result) >= 2:
+            # Second element is usually the text descriptions
+            if len(result) > 1 and result[1]:
+                text_output = str(result[1])
+                lines = text_output.strip().split('\n')
+                
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    
+                    # Parse element descriptions
+                    # Expected formats might be:
+                    # "button: Click here @ (100, 200, 50, 30)"
+                    # "icon: Settings <select>100, 200, 150, 230</select>"
+                    
+                    import re
+                    
+                    # Try to extract coordinates
+                    coord_match = re.search(r'[\(<](\d+),?\s*(\d+),?\s*(\d+),?\s*(\d+)[>\)]', line)
+                    if coord_match:
+                        x, y, x2, y2 = map(int, coord_match.groups())
+                        # Calculate center point
+                        center_x = (x + x2) // 2 if x2 > x else x
+                        center_y = (y + y2) // 2 if y2 > y else y
+                        
+                        # Extract type and description
+                        desc_part = line[:coord_match.start()].strip()
+                        if ':' in desc_part:
+                            elem_type, desc = desc_part.split(':', 1)
+                            elem_type = elem_type.strip()
+                            desc = desc.strip()
+                        else:
+                            elem_type = "element"
+                            desc = desc_part
+                        
+                        elements.append(f"{elem_type}:{desc} - click ({center_x}, {center_y})")
+        
+        if elements:
+            return "\n".join(elements)
+        else:
+            return "No elements detected by OmniParser"
+            
+    except Exception as e:
+        print(f"❌ Failed to parse OmniParser result: {e}", file=sys.stderr)
+        return "Failed to parse OmniParser output"
+
 def _call_openrouter_vision(image_bytes: bytes) -> str:
     """Call OpenRouter vision API using two-pass TSV system"""
     try:
@@ -1395,8 +2256,18 @@ def analyze_screenshot(host: str, port: int, vm_target: str = "local") -> Dict[s
         width, height = img.size
         print(f"🔍 Original PPM screenshot: {width}x{height}", file=sys.stderr)
         
-        # Analyze using window/taskbar TSV system
-        vision_description = _analyze_windows_and_taskbars(image_bytes, width, height)
+        # Try OmniParser for GUI detection (using Replicate API)
+        omniparser_result = _call_omniparser_replicate(image_bytes)
+        
+        if omniparser_result.get("success"):
+            print("✅ Using OmniParser v2.0 via Replicate API for GUI detection", file=sys.stderr)
+            vision_description = _parse_omniparser_result(omniparser_result.get("result"), width, height)
+            # Add screen dimensions
+            vision_description = f"{width}x{height}|OmniParser GUI Detection\n\n{vision_description}"
+        else:
+            print("❌ OmniParser failed, falling back to OpenRouter TSV system", file=sys.stderr)
+            # Fallback to window/taskbar TSV system
+            vision_description = _analyze_windows_and_taskbars(image_bytes, width, height)
         
         return {
             "success": True,
@@ -1850,7 +2721,17 @@ def main():
             # Parse input for either text or actions using string parsing
             actions = []
             
-            if '"text":' in raw_input:
+            if '"actions":' in raw_input:
+                # For actions, just parse using json module since it's more complex
+                try:
+                    data = json.loads(raw_input)
+                    actions = data.get('actions', [])
+                    print(f"DEBUG: Extracted actions: {actions}", file=sys.stderr)
+                except Exception as e:
+                    print(f'{{"success": false, "error": "Failed to parse actions: {str(e)}"}}')
+                    sys.exit(1)
+            
+            elif '"text":' in raw_input:
                 # Extract text field
                 start = raw_input.find('"text":')
                 if start != -1:
@@ -1883,16 +2764,6 @@ def main():
                             text = text.replace('\\\\', '\\')
                             print(f"DEBUG: Extracted text: {repr(text)}", file=sys.stderr)
                             actions = [{'action': 'type', 'text': text}]
-            
-            elif '"actions":' in raw_input:
-                # For actions, just parse using json module since it's more complex
-                try:
-                    data = json.loads(raw_input)
-                    actions = data.get('actions', [])
-                    print(f"DEBUG: Extracted actions: {actions}", file=sys.stderr)
-                except Exception as e:
-                    print(f'{{"success": false, "error": "Failed to parse actions: {str(e)}"}}')
-                    sys.exit(1)
             
             if not actions:
                 print('{"success": false, "error": "No text or actions found"}')

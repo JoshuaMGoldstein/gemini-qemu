@@ -12,5 +12,14 @@
       "qmp_port": 4444,
       "description": "Puppy Linux VM"
     }
+  },
+  "replicate": {
+    "model": "microsoft/omniparser-v2:49cf3d41b8d3aca1360514e83be4c97131ce8f0d99abfc365526d8384caa88df",
+    "api_key_env": "REPLICATE_API_TOKEN",
+    "default_params": {
+      "imgsz": 640,
+      "box_threshold": 0.05,
+      "iou_threshold": 0.1
+    }
   }
 }

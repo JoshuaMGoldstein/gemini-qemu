@@ -11,6 +11,9 @@ __pycache__/
 *.pyo
 *.pyd
 
+# OmniParser model files
+OmniParser/
+
 # Settings and credentials
 *.key
 *.pem

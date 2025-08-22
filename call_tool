@@ -12,16 +12,33 @@ VENV_DIR="$SCRIPT_DIR/.vnc_env"
 
 # Setup virtual environment if it doesn't exist
 if [ ! -f "$VENV_DIR/bin/python" ]; then
-    # Create venv and install dependencies silently
+    # Create venv and install dependencies
+    echo '{"status": "initializing", "message": "Creating virtual environment..."}' >&2
     python3 -m venv "$VENV_DIR" >/dev/null 2>&1
-    "$VENV_DIR/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1
-    "$VENV_DIR/bin/pip" install --quiet vncdotool pillow requests python-dotenv >/dev/null 2>&1
     
-    # Check if installation succeeded
-    if [ $? -ne 0 ]; then
-        echo '{"success": false, "error": "Failed to install dependencies. Please run: pip install vncdotool pillow requests python-dotenv"}'
+    # Set pip cache and temp directories to use our partition
+    export PIP_CACHE_DIR="$SCRIPT_DIR/.pip_cache"
+    export TMPDIR="$SCRIPT_DIR/.tmp"
+    mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
+    
+    # Install basic dependencies first
+    echo '{"status": "installing", "message": "Installing basic dependencies..."}' >&2
+    "$VENV_DIR/bin/pip" install --upgrade pip --quiet
+    if ! "$VENV_DIR/bin/pip" install vncdotool pillow requests python-dotenv gradio-client openai --quiet; then
+        echo '{"success": false, "error": "Failed to install basic dependencies. Please run: pip install vncdotool pillow requests python-dotenv gradio-client"}'
         exit 1
     fi
+    
+    # Install OmniParser dependencies - wait for completion
+    echo '{"status": "installing", "message": "Installing OmniParser dependencies (this may take several minutes)..."}' >&2
+    if ! "$VENV_DIR/bin/pip" install torch torchvision transformers accelerate timm ultralytics easyocr supervision paddleocr --quiet; then
+        echo '{"status": "warning", "message": "Some OmniParser dependencies failed to install, falling back to basic functionality"}' >&2
+    else
+        echo '{"status": "complete", "message": "All dependencies installed successfully"}' >&2
+    fi
+    
+    # Clean up temp directories
+    rm -rf "$TMPDIR" "$PIP_CACHE_DIR"
 fi
 
 # Use the venv Python
@@ -73,7 +90,7 @@ case "$FUNCTION_NAME" in
         
     "send_keyboard")
         # Pass the JSON from ARGS to Python stdin
-        echo "$ARGS" | timeout 4s "$PYTHON" -W ignore "$SCRIPT_DIR/vnc_tools.py" keyboard --stdin-json
+        echo "$ARGS" | timeout 10s "$PYTHON" -W ignore "$SCRIPT_DIR/vnc_tools.py" keyboard --stdin-json
         EXIT_CODE=$?
         
         # Handle timeout
