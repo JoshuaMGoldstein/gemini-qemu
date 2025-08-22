@@ -367,8 +367,446 @@ def _merge_text_elements(elements):
     
     return merged_element
 
+def _detect_ui_patterns(image_bytes: bytes, width: int, height: int) -> dict:
+    """Stage 1: Detect structural UI patterns (windows, toolbars, tab bars, etc.)"""
+    from PIL import Image
+    import io
+    import numpy as np
+    
+    # Convert to PIL Image for analysis
+    image = Image.open(io.BytesIO(image_bytes))
+    img_array = np.array(image)
+    
+    patterns = {
+        "windows": [],
+        "tab_bars": [],
+        "toolbars": [],
+        "title_bars": []
+    }
+    
+    h, w = img_array.shape[:2]
+    
+    # Improved window detection using edge detection and horizontal line analysis
+    def detect_window_boundaries():
+        """Detect actual window boundaries using edge detection"""
+        windows = []
+        
+        # Convert to grayscale for edge detection
+        if len(img_array.shape) == 3:
+            gray = np.mean(img_array, axis=2)
+        else:
+            gray = img_array
+            
+        # Find horizontal edges (window title bars typically have strong horizontal edges)
+        horizontal_edges = []
+        
+        # Scan for significant horizontal changes in brightness
+        for y in range(10, h - 50, 5):  # Skip very top and bottom, step by 5 for efficiency
+            # Check if this row has title-bar-like characteristics
+            row = gray[y, :]
+            
+            # Look for patterns typical of title bars:
+            # 1. Relatively uniform color across most of the width
+            # 2. Distinct brightness difference from row above/below
+            # 3. Contains some variation (buttons, text) but not too much
+            
+            if y > 10 and y < h - 10:
+                row_above = gray[y-5, :]
+                row_below = gray[y+5, :]
+                
+                # Calculate difference with surrounding rows
+                diff_above = np.mean(np.abs(row - row_above))
+                diff_below = np.mean(np.abs(row - row_below))
+                
+                # Check if this looks like a title bar boundary
+                if diff_above > 15 or diff_below > 15:  # Significant brightness change
+                    # Check if the row itself has title-bar characteristics
+                    row_std = np.std(row)
+                    if 10 < row_std < 50:  # Some variation but not too noisy
+                        # Check if there's a clear left/right pattern (window borders)
+                        left_region = row[:50] if len(row) > 50 else row[:len(row)//3]
+                        right_region = row[-50:] if len(row) > 50 else row[-len(row)//3:]
+                        
+                        # Look for window-like bounds
+                        if np.std(left_region) > 5 and np.std(right_region) > 5:
+                            horizontal_edges.append(y)
+        
+        # Group nearby horizontal edges into windows
+        if not horizontal_edges:
+            # Fallback: assume full screen window
+            windows.append({
+                "type": "main_window",
+                "bbox": [0, 0, w, h],
+                "title_region": [0, 0, w, 50]
+            })
+        else:
+            # Group edges that are close together
+            edge_groups = []
+            current_group = [horizontal_edges[0]] if horizontal_edges else []
+            
+            for edge in horizontal_edges[1:]:
+                if edge - current_group[-1] < 30:  # Within 30 pixels
+                    current_group.append(edge)
+                else:
+                    if current_group:
+                        edge_groups.append(current_group)
+                    current_group = [edge]
+            
+            if current_group:
+                edge_groups.append(current_group)
+            
+            # Create window regions from edge groups
+            for i, group in enumerate(edge_groups):
+                title_y = min(group)
+                
+                # Determine window bounds
+                window_top = max(0, title_y - 5)
+                
+                # Find window bottom (next group or screen bottom)
+                if i + 1 < len(edge_groups):
+                    window_bottom = min(edge_groups[i + 1]) - 5
+                else:
+                    window_bottom = h - 40  # Leave space for taskbar
+                
+                # Ensure reasonable window size
+                if window_bottom - window_top > 50:
+                    windows.append({
+                        "type": f"window_{i+1}",
+                        "bbox": [0, window_top, w, window_bottom],
+                        "title_region": [0, title_y, w, title_y + 20]  # 20px title bar
+                    })
+        
+        return windows
+    
+    # Use improved window detection
+    patterns["windows"] = detect_window_boundaries()
+    
+    # Detect title bars for each window
+    for window in patterns["windows"]:
+        title_region = window.get("title_region", [])
+        if len(title_region) >= 4:
+            tx1, ty1, tx2, ty2 = title_region
+            patterns["title_bars"].append({
+                "type": "title_bar",
+                "bbox": title_region,
+                "region": "title_area",
+                "parent_window": window
+            })
+    
+    # Detect tab areas within windows
+    for window in patterns["windows"]:
+        bbox = window.get("bbox", [])
+        if len(bbox) >= 4:
+            wx1, wy1, wx2, wy2 = bbox
+            # Look for tabs just below title bar
+            tab_start_y = wy1 + 25  # Below title
+            tab_end_y = min(wy1 + 60, wy2)  # 35px tab area
+            
+            if tab_end_y > tab_start_y:
+                tab_region = img_array[tab_start_y:tab_end_y, wx1:wx2]
+                if np.std(tab_region) > 15:  # Visual complexity suggests tabs
+                    patterns["tab_bars"].append({
+                        "type": "tab_bar",
+                        "bbox": [wx1, tab_start_y, wx2, tab_end_y],
+                        "region": "tabs",
+                        "parent_window": window
+                    })
+    
+    print(f"🔍 Stage 1: Detected {len(patterns['windows'])} windows, {len(patterns['title_bars'])} title bars, {len(patterns['tab_bars'])} tab areas", file=sys.stderr)
+    return patterns
+
+def _build_window_hypotheses(elements: list, width: int, height: int) -> list:
+    """Build window hypotheses from element clustering"""
+    import numpy as np
+    from sklearn.cluster import DBSCAN
+    
+    if len(elements) < 3:
+        return []
+    
+    # Convert elements to points for clustering
+    points = []
+    element_map = {}
+    
+    for i, element in enumerate(elements):
+        bbox = element.get('bbox', [])
+        if len(bbox) >= 4:
+            # Convert normalized coordinates to pixels
+            x = int((bbox[0] + bbox[2]) / 2 * width)  # center x
+            y = int((bbox[1] + bbox[3]) / 2 * height)  # center y
+            points.append([x, y])
+            element_map[i] = element
+    
+    if len(points) < 3:
+        return []
+    
+    P = np.array(points, dtype=float)
+    
+    # Screen-normalized anisotropic distances (horizontal proximity counts more)
+    X = np.stack([P[:, 0] / width / 0.7, P[:, 1] / height / 1.0], axis=1)
+    
+    # Cluster elements spatially
+    clustering = DBSCAN(eps=0.08, min_samples=3).fit(X)  # Tuned for desktop windows
+    labels = clustering.labels_
+    
+    windows = []
+    for lbl in set(labels):
+        if lbl == -1:  # Noise points
+            continue
+            
+        # Get cluster indices
+        idx = np.where(labels == lbl)[0]
+        if len(idx) < 3:
+            continue
+            
+        # Calculate bounding box for this cluster
+        xs = P[idx, 0]
+        ys = P[idx, 1]
+        x1, y1, x2, y2 = xs.min(), ys.min(), xs.max(), ys.max()
+        
+        # Expand with padding
+        pad = 20
+        win = {
+            'id': f'win_{len(windows)}',
+            'x1': max(0, int(x1 - pad)), 
+            'y1': max(0, int(y1 - pad)),
+            'x2': min(width - 1, int(x2 + pad)), 
+            'y2': min(height - 1, int(y2 + pad)),
+            'members': [element_map[i]['id'] if 'id' in element_map[i] else f"elem_{i}" for i in idx if i in element_map],
+            'score': 0.0, 
+            'title': None,
+            'elements': [element_map[i] for i in idx if i in element_map]
+        }
+        
+        # Score based on title anchor (single text line in top band)
+        top_band = win['y1'] + 0.12 * (win['y2'] - win['y1'])
+        titles = []
+        for i in idx:
+            if i in element_map:
+                elem = element_map[i]
+                content = elem.get('content', '').strip()
+                elem_type = elem.get('type', '')
+                bbox = elem.get('bbox', [])
+                if (elem_type == 'text' and len(content) >= 3 and len(bbox) >= 4):
+                    elem_y = int((bbox[1] + bbox[3]) / 2 * height)
+                    if elem_y < top_band:
+                        titles.append(content)
+        
+        if len(titles) == 1:
+            win['title'] = titles[0]
+            win['score'] += 1.0
+        elif len(titles) > 1:
+            # Pick the longest title as most likely window title
+            win['title'] = max(titles, key=len)
+            win['score'] += 0.8
+        
+        # Score based on close-like buttons in top-right
+        right_band_x = win['x1'] + 0.84 * (win['x2'] - win['x1'])
+        top_band_y = win['y1'] + 0.14 * (win['y2'] - win['y1'])
+        
+        closers = 0
+        for i in idx:
+            if i in element_map:
+                elem = element_map[i]
+                bbox = elem.get('bbox', [])
+                content = elem.get('content', '').lower()
+                elem_type = elem.get('type', '')
+                
+                if len(bbox) >= 4:
+                    elem_x = int((bbox[0] + bbox[2]) / 2 * width)
+                    elem_y = int((bbox[1] + bbox[3]) / 2 * height)
+                    elem_w = int((bbox[2] - bbox[0]) * width)
+                    elem_h = int((bbox[3] - bbox[1]) * height)
+                    
+                    is_close_like = (
+                        'x' in content or 'close' in content or 'dismiss' in content or
+                        (elem_w * elem_h <= 26 * 26 and elem_type in ('button', 'icon'))
+                    )
+                    
+                    if is_close_like and elem_x >= right_band_x and elem_y <= top_band_y:
+                        closers += 1
+        
+        if closers > 0:
+            win['score'] += 0.6
+        
+        windows.append(win)
+    
+    print(f"🔍 Window Hypotheses: Generated {len(windows)} window candidates", file=sys.stderr)
+    for w in windows:
+        print(f"🔍   Window {w['id']}: title='{w['title']}', score={w['score']:.1f}, elements={len(w['elements'])}", file=sys.stderr)
+    
+    return windows
+
+def _assign_elements_to_windows(elements: list, windows: list, width: int, height: int) -> list:
+    """Assign every element to its best parent window"""
+    
+    def inside(elem_bbox, win):
+        if len(elem_bbox) < 4:
+            return False
+        elem_x = int((elem_bbox[0] + elem_bbox[2]) / 2 * width)
+        elem_y = int((elem_bbox[1] + elem_bbox[3]) / 2 * height)
+        return (win['x1'] <= elem_x <= win['x2']) and (win['y1'] <= elem_y <= win['y2'])
+    
+    def outside_dist(elem_bbox, win):
+        if len(elem_bbox) < 4:
+            return 1000
+        elem_x = int((elem_bbox[0] + elem_bbox[2]) / 2 * width)
+        elem_y = int((elem_bbox[1] + elem_bbox[3]) / 2 * height)
+        dx = max(win['x1'] - elem_x, 0, elem_x - win['x2'])
+        dy = max(win['y1'] - elem_y, 0, elem_y - win['y2'])
+        return (dx * dx + dy * dy) ** 0.5
+    
+    results = []
+    for i, elem in enumerate(elements):
+        bbox = elem.get('bbox', [])
+        elem_type = elem.get('type', '')
+        content = elem.get('content', '').strip()
+        
+        if not windows or len(bbox) < 4:
+            # No windows or invalid element
+            results.append({**elem, 'parent_window_id': None, 'parent_window_title': None})
+            continue
+        
+        best = None
+        best_cost = 1e9
+        
+        for win in windows:
+            cost = 0.0
+            
+            # Strong reward for containment
+            if inside(bbox, win):
+                cost -= 2.0
+            else:
+                # Penalty for being outside
+                cost += 0.02 * outside_dist(bbox, win)
+            
+            # Reward for text in title band
+            title_band = win['y1'] + 0.15 * (win['y2'] - win['y1'])
+            if elem_type == 'text' and len(content) >= 3:
+                elem_y = int((bbox[1] + bbox[3]) / 2 * height)
+                if elem_y <= title_band:
+                    cost -= 0.5
+            
+            # Reward for close-like elements in top-right
+            right_band_x = win['x1'] + 0.86 * (win['x2'] - win['x1'])
+            top_band_y = win['y1'] + 0.12 * (win['y2'] - win['y1'])
+            
+            content_lower = content.lower()
+            is_close_like = (
+                'close' in content_lower or content_lower.strip() in ('x', '×') or
+                'dismiss' in content_lower or
+                (len(bbox) >= 4 and 
+                 (bbox[2] - bbox[0]) * width * (bbox[3] - bbox[1]) * height <= 26 * 26 and 
+                 elem_type in ('button', 'icon'))
+            )
+            
+            if is_close_like:
+                elem_x = int((bbox[0] + bbox[2]) / 2 * width)
+                elem_y = int((bbox[1] + bbox[3]) / 2 * height)
+                if elem_x >= right_band_x and elem_y <= top_band_y:
+                    cost -= 0.5
+            
+            # Prefer higher-scoring windows
+            cost -= 0.2 * win['score']
+            
+            # Tie-break by smaller area (more specific window)
+            win_area = (win['x2'] - win['x1']) * (win['y2'] - win['y1'])
+            cost += win_area * 0.000001  # Very small penalty for large windows
+            
+            if cost < best_cost:
+                best_cost = cost
+                best = win
+        
+        # Assign to best window
+        parent_id = best['id'] if best else None
+        parent_title = best['title'] if best else None
+        
+        results.append({
+            **elem, 
+            'parent_window_id': parent_id, 
+            'parent_window_title': parent_title
+        })
+    
+    # Count assignments
+    assigned = sum(1 for r in results if r['parent_window_id'] is not None)
+    print(f"🔍 Element Assignment: {assigned}/{len(elements)} elements assigned to windows", file=sys.stderr)
+    
+    return results
+
+def _build_element_relationships(elements: list, ui_patterns: dict, width: int, height: int) -> dict:
+    """Stage 3: Build spatial relationships between UI elements and windows"""
+    
+    # Step 1: Build window hypotheses from element clustering
+    windows = _build_window_hypotheses(elements, width, height)
+    
+    if not windows:
+        print("🔍 No window hypotheses generated, skipping relationship building", file=sys.stderr)
+        return {}
+    
+    # Step 2: Assign every element to its best parent window
+    elements_with_parents = _assign_elements_to_windows(elements, windows, width, height)
+    
+    # Step 3: Build semantic relationships
+    relationships = {}
+    
+    for elem in elements_with_parents:
+        if elem['parent_window_id'] is None:
+            continue
+            
+        bbox = elem.get('bbox', [])
+        content = elem.get('content', '').strip()
+        elem_type = elem.get('type', '')
+        parent_title = elem['parent_window_title'] or 'unknown_window'
+        
+        if len(bbox) < 4:
+            continue
+        
+        # Calculate click coordinates
+        click_x = int((bbox[0] + bbox[2]) / 2 * width)
+        click_y = int((bbox[1] + bbox[3]) / 2 * height)
+        
+        # Determine semantic role
+        content_lower = content.lower()
+        is_close_like = (
+            'close' in content_lower or content_lower.strip() in ('x', '×') or
+            'dismiss' in content_lower or
+            (elem_type in ('button', 'icon') and 
+             (bbox[2] - bbox[0]) * width * (bbox[3] - bbox[1]) * height <= 26 * 26)
+        )
+        
+        # Find parent window details
+        parent_window = next((w for w in windows if w['id'] == elem['parent_window_id']), None)
+        
+        if parent_window and is_close_like:
+            # Check if it's in the top-right area (close button position)
+            right_band_x = parent_window['x1'] + 0.86 * (parent_window['x2'] - parent_window['x1'])
+            top_band_y = parent_window['y1'] + 0.12 * (parent_window['y2'] - parent_window['y1'])
+            
+            if click_x >= right_band_x and click_y <= top_band_y:
+                # This is likely a close button
+                relationships[f"close_button_{len(relationships)}"] = {
+                    "action": "close_window",
+                    "target_name": parent_title,
+                    "element": elem,
+                    "click_point": [click_x, click_y],
+                    "semantic_description": f"close_button_in_{parent_title.replace(' ', '_')}_window"
+                }
+        
+        # Add general containment relationship
+        role = "close_button" if is_close_like else elem_type
+        window_name = parent_title.replace(' ', '_').lower()
+        relationships[f"{role}_in_{window_name}_{len(relationships)}"] = {
+            "action": f"{role}_action",
+            "target_name": parent_title,
+            "element": elem,
+            "click_point": [click_x, click_y],
+            "semantic_description": f"{role}_in_{window_name}_window:{content}"
+        }
+    
+    print(f"🔍 Stage 3: Built {len(relationships)} element relationships", file=sys.stderr)
+    return relationships
+
 def _call_omniparser_replicate(image_bytes: bytes) -> dict:
-    """Call OmniParser v2.0 via Replicate API"""
+    """Call OmniParser v2.0 via Replicate API with hierarchical detection"""
     try:
         import replicate
         import base64
@@ -377,7 +815,7 @@ def _call_omniparser_replicate(image_bytes: bytes) -> dict:
         from PIL import Image
         from pathlib import Path
         
-        print("🔍 Using Replicate API for OmniParser v2.0...", file=sys.stderr)
+        print("🔍 Using Hierarchical Detection with Replicate API for OmniParser v2.0...", file=sys.stderr)
         
         # Load configuration
         script_dir = Path(__file__).parent
@@ -488,6 +926,10 @@ def _call_omniparser_replicate(image_bytes: bytes) -> dict:
         
         total_api_time = time.time() - start_time
         print(f"🔍 All 5 API calls completed in {total_api_time:.2f}s", file=sys.stderr)
+        
+        # STAGE 1: Detect UI patterns from the full image
+        print("🔍 Stage 1: Analyzing UI patterns...", file=sys.stderr)
+        ui_patterns = _detect_ui_patterns(image_bytes, width, height)
         
         # Process results from all 5 API calls
         print("🔍 Processing results from 5 API calls...", file=sys.stderr)
@@ -727,20 +1169,34 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 )
                 
                 # Get SOM labeled image and parsed content for quadrant (UI elements focused)
-                quad_dino_labeled_img, quad_label_coordinates, quad_parsed_content_list = get_som_labeled_img(
-                    quad_image, 
-                    yolo_model, 
-                    BOX_TRESHOLD=0.05, 
-                    output_coord_in_ratio=True, 
-                    ocr_bbox=quad_ocr_bbox or [],  # Provide OCR boxes for compatibility
-                    draw_bbox_config=draw_bbox_config, 
-                    caption_model_processor=caption_model_processor, 
-                    ocr_text=quad_text or [],  # Provide OCR text for compatibility
-                    use_local_semantics=True, 
-                    iou_threshold=0.7, 
-                    scale_img=False, 
-                    batch_size=128
-                )
+                try:
+                    quad_dino_labeled_img, quad_label_coordinates, quad_parsed_content_list = get_som_labeled_img(
+                        quad_image, 
+                        yolo_model, 
+                        BOX_TRESHOLD=0.05, 
+                        output_coord_in_ratio=True, 
+                        ocr_bbox=quad_ocr_bbox or [],  # Provide OCR boxes for compatibility
+                        draw_bbox_config=draw_bbox_config, 
+                        caption_model_processor=caption_model_processor, 
+                        ocr_text=quad_text or [],  # Provide OCR text for compatibility
+                        use_local_semantics=True, 
+                        iou_threshold=0.7, 
+                        scale_img=False, 
+                        batch_size=128
+                    )
+                    
+                    # Handle None returns
+                    if quad_label_coordinates is None:
+                        quad_label_coordinates = {}
+                    if quad_parsed_content_list is None:
+                        quad_parsed_content_list = []
+                    
+                except Exception as e:
+                    print(f"❌ OmniParser error processing {quad_name}: {e}", file=sys.stderr)
+                    # Continue with empty results for this quadrant
+                    quad_dino_labeled_img = ""
+                    quad_label_coordinates = {}
+                    quad_parsed_content_list = []
                 
                 # Filter out any text elements from quadrant processing - we only want icons
                 quad_parsed_content_list = [e for e in quad_parsed_content_list if e.get('type') == 'icon']
@@ -787,6 +1243,14 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
             print("🔍 Combining full-image text with quadrant UI elements...", file=sys.stderr)
             all_elements = full_text_elements + deduplicated_ui_elements
             
+            # STAGE 1: Detect UI patterns from the full image
+            print("🔍 Stage 1: Analyzing UI patterns...", file=sys.stderr)
+            ui_patterns = _detect_ui_patterns(image_bytes, width, height)
+            
+            # STAGE 3: Build element relationships for context-aware clicking
+            print("🔍 Stage 3: Building element relationships...", file=sys.stderr)
+            relationships = _build_element_relationships(all_elements, ui_patterns, width, height)
+            
             # No need for complex text reconstruction since we got complete text from full image
             reconstructed_content = all_elements
             
@@ -806,7 +1270,9 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 "result": {
                     "labeled_image": dino_labeled_img,
                     "coordinates": label_coordinates,
-                    "parsed_content_list": parsed_content_list
+                    "parsed_content_list": parsed_content_list,
+                    "ui_patterns": ui_patterns,
+                    "relationships": relationships
                 }
             }
                 
@@ -831,8 +1297,10 @@ def _parse_omniparser_result(result, width=800, height=600) -> str:
         if isinstance(result, dict) and "parsed_content_list" in result:
             parsed_content_list = result["parsed_content_list"]
             coordinates = result.get("coordinates", [])
+            relationships = result.get("relationships", {})
+            ui_patterns = result.get("ui_patterns", {})
             
-            print(f"🔍 Parsing {len(parsed_content_list)} OmniParser elements", file=sys.stderr)
+            print(f"🔍 Parsing {len(parsed_content_list)} OmniParser elements with {len(relationships)} relationships", file=sys.stderr)
             
             for i, element in enumerate(parsed_content_list):
                 element_type = element.get('type', 'unknown')
@@ -850,8 +1318,22 @@ def _parse_omniparser_result(result, width=800, height=600) -> str:
                     center_x_px = int(center_x_ratio * width)
                     center_y_px = int(center_y_ratio * height)
                     
+                    # Check if this element has a relationship for better description
+                    enhanced_desc = None
+                    for rel_key, rel_info in relationships.items():
+                        if rel_info.get("element") == element:
+                            action = rel_info.get("action", "click")
+                            target_name = rel_info.get("target_name", content)
+                            if action == "close_window":
+                                enhanced_desc = f"close_button:close {target_name} window - click ({center_x_px}, {center_y_px})"
+                            elif action == "close_tab":
+                                enhanced_desc = f"close_button:close {target_name} tab - click ({center_x_px}, {center_y_px})"
+                            break
+                    
                     # Create clickable element description with pixel coordinates
-                    if element_type == 'text':
+                    if enhanced_desc:
+                        desc = enhanced_desc
+                    elif element_type == 'text':
                         desc = f"text:{content} - click ({center_x_px}, {center_y_px})"
                     elif element_type == 'icon':
                         desc = f"icon:{content} - click ({center_x_px}, {center_y_px})"
@@ -1598,6 +2080,9 @@ def parse_normalized_tsv(content: str, W: int, H: int) -> tuple:
         if parts[0] == "BTN" and len(parts) >= 8:
             try:
                 role = parts[1]
+                # Skip header lines like "BTN   role(C|M|N)  k  px py pw ph  conf"
+                if role == "role(C|M|N)" or not role.isalpha():
+                    continue
                 k = int(parts[2])
                 px, py, pw, ph = map(float, parts[3:7])
                 conf = float(parts[7]) if len(parts) > 7 else 0.9
@@ -2257,17 +2742,27 @@ def analyze_screenshot(host: str, port: int, vm_target: str = "local") -> Dict[s
         print(f"🔍 Original PPM screenshot: {width}x{height}", file=sys.stderr)
         
         # Try OmniParser for GUI detection (using Replicate API)
-        omniparser_result = _call_omniparser_replicate(image_bytes)
+        # Try local OmniParser first, then Replicate as fallback
+        omniparser_result = _call_omniparser_vision(image_bytes)
         
         if omniparser_result.get("success"):
-            print("✅ Using OmniParser v2.0 via Replicate API for GUI detection", file=sys.stderr)
+            print("✅ Using local OmniParser v2.0 for GUI detection", file=sys.stderr)
             vision_description = _parse_omniparser_result(omniparser_result.get("result"), width, height)
             # Add screen dimensions
             vision_description = f"{width}x{height}|OmniParser GUI Detection\n\n{vision_description}"
         else:
-            print("❌ OmniParser failed, falling back to OpenRouter TSV system", file=sys.stderr)
-            # Fallback to window/taskbar TSV system
-            vision_description = _analyze_windows_and_taskbars(image_bytes, width, height)
+            print("❌ Local OmniParser failed, trying Replicate API...", file=sys.stderr)
+            omniparser_result = _call_omniparser_replicate(image_bytes)
+            
+            if omniparser_result.get("success"):
+                print("✅ Using OmniParser v2.0 via Replicate API for GUI detection", file=sys.stderr)
+                vision_description = _parse_omniparser_result(omniparser_result.get("result"), width, height)
+                # Add screen dimensions
+                vision_description = f"{width}x{height}|OmniParser GUI Detection\n\n{vision_description}"
+            else:
+                print("❌ Both local and Replicate OmniParser failed, falling back to OpenRouter TSV system", file=sys.stderr)
+                # Fallback to window/taskbar TSV system
+                vision_description = _analyze_windows_and_taskbars(image_bytes, width, height)
         
         return {
             "success": True,

@@ -21,18 +21,36 @@ if [ ! -f "$VENV_DIR/bin/python" ]; then
     export TMPDIR="$SCRIPT_DIR/.tmp"
     mkdir -p "$PIP_CACHE_DIR" "$TMPDIR"
     
-    # Install basic dependencies first
-    echo '{"status": "installing", "message": "Installing basic dependencies..."}' >&2
+    # Install ALL required dependencies for complete functionality:
+    # - vncdotool: VNC client for remote desktop control
+    # - pillow: Image processing for screenshots
+    # - requests: HTTP client for API calls  
+    # - python-dotenv: Environment variable loading
+    # - gradio-client: Gradio API client (if needed)
+    # - openai: OpenAI API client 
+    # - scikit-learn: Machine learning (DBSCAN clustering for window detection)
+    # - numpy: Numerical computing (required by scikit-learn)
+    # - replicate: Replicate API client for OmniParser
+    echo '{"status": "installing", "message": "Installing core dependencies..."}' >&2
     "$VENV_DIR/bin/pip" install --upgrade pip --quiet
-    if ! "$VENV_DIR/bin/pip" install vncdotool pillow requests python-dotenv gradio-client openai --quiet; then
-        echo '{"success": false, "error": "Failed to install basic dependencies. Please run: pip install vncdotool pillow requests python-dotenv gradio-client"}'
+    if ! "$VENV_DIR/bin/pip" install vncdotool pillow requests python-dotenv gradio-client openai scikit-learn numpy replicate --quiet; then
+        echo '{"success": false, "error": "Failed to install core dependencies. Please run: pip install vncdotool pillow requests python-dotenv gradio-client openai scikit-learn numpy replicate"}'
         exit 1
     fi
     
-    # Install OmniParser dependencies - wait for completion
+    # Install OmniParser/local vision model dependencies (large downloads):
+    # - torch, torchvision: PyTorch for deep learning models
+    # - transformers: Hugging Face transformers library  
+    # - accelerate: Accelerated training library
+    # - timm: PyTorch image models
+    # - ultralytics: YOLO object detection
+    # - easyocr: Optical character recognition
+    # - supervision: Computer vision utilities
+    # - paddlepaddle: PaddlePaddle deep learning framework
+    # - paddleocr: PaddlePaddle OCR toolkit
     echo '{"status": "installing", "message": "Installing OmniParser dependencies (this may take several minutes)..."}' >&2
-    if ! "$VENV_DIR/bin/pip" install torch torchvision transformers accelerate timm ultralytics easyocr supervision paddleocr --quiet; then
-        echo '{"status": "warning", "message": "Some OmniParser dependencies failed to install, falling back to basic functionality"}' >&2
+    if ! "$VENV_DIR/bin/pip" install torch torchvision transformers accelerate timm ultralytics easyocr supervision paddlepaddle paddleocr --quiet; then
+        echo '{"status": "warning", "message": "Some OmniParser dependencies failed to install, falling back to API-only functionality"}' >&2
     else
         echo '{"status": "complete", "message": "All dependencies installed successfully"}' >&2
     fi
