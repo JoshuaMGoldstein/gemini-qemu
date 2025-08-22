@@ -1,0 +1,53 @@
+# VM files and directories
+.llmvm/
+*.qcow2
+*.iso
+*.pid
+
+# Python virtual environment
+.vnc_env/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Settings and credentials
+*.key
+*.pem
+api_keys.txt
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+/tmp/
+logs/
+
+# Screenshots and output files
+screenshot_*.png
+screenshot_*.jpg
+/tmp/screenshot_*
+qmp_screenshot_*
+
+# Backup files
+*.bak
+*.backup
+*.orig
+*~
+
+# OS specific files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+.vim/
+
+# Test output files
+test_output/
+*_result.json
+timing_*.txt

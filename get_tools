@@ -1,0 +1,108 @@
+#!/bin/bash
+
+# Tool discovery script for Gemini CLI
+# Returns JSON array of function declarations
+
+cat << 'EOF'
+[
+  {
+    "name": "get_screenshot_description",
+    "description": "Capture a screenshot of the VM and get a detailed description of all visible UI elements with their coordinates and properties",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "vm_target": {
+          "type": "string",
+          "description": "Target VM identifier to connect to",
+          "enum": ["local", "ubuntu-vm", "test-vm"],
+          "default": "local"
+        }
+      },
+      "required": []
+    }
+  },
+  {
+    "name": "send_mouse_clicks",
+    "description": "Send mouse click events to the VM at specified screen coordinates",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "vm_target": {
+          "type": "string",
+          "description": "Target VM identifier to connect to",
+          "enum": ["local", "ubuntu-vm", "test-vm"],
+          "default": "local"
+        },
+        "clicks": {
+          "type": "array",
+          "description": "Array of click actions to perform",
+          "items": {
+            "type": "object",
+            "properties": {
+              "x": {
+                "type": "integer",
+                "description": "X coordinate for click (0-based from top-left)"
+              },
+              "y": {
+                "type": "integer",
+                "description": "Y coordinate for click (0-based from top-left)"
+              },
+              "button": {
+                "type": "integer",
+                "description": "Mouse button to click",
+                "enum": [1, 2, 3]
+              },
+              "action": {
+                "type": "string",
+                "description": "Type of click action",
+                "enum": ["click", "double_click"]
+              }
+            },
+            "required": ["x", "y", "button", "action"]
+          }
+        }
+      },
+      "required": ["clicks"]
+    }
+  },
+  {
+    "name": "send_keyboard",
+    "description": "Send keyboard input (text typing and key combinations) to the VM",
+    "parameters": {
+      "type": "object",
+      "properties": {
+        "vm_target": {
+          "type": "string",
+          "description": "Target VM identifier to connect to",
+          "enum": ["local", "ubuntu-vm", "test-vm"],
+          "default": "local"
+        },
+        "actions": {
+          "type": "array",
+          "description": "Array of keyboard actions to perform",
+          "items": {
+            "type": "object",
+            "properties": {
+              "action": {
+                "type": "string",
+                "description": "Type of keyboard action",
+                "enum": ["type", "key"]
+              },
+              "text": {
+                "type": "string",
+                "description": "Text to type (required when action=type)"
+              },
+              "key": {
+                "type": "string",
+                "description": "Key or key combination to press (required when action=key). Examples: enter, ctrl+c, alt+tab"
+              }
+            },
+            "required": ["action"]
+          }
+        }
+      },
+      "required": ["actions"]
+    }
+  }
+]
+EOF

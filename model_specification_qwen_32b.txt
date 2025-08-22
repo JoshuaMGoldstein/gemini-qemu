@@ -1,0 +1,57 @@
+QWEN 2.5 VL 32B MODEL CONFIGURATION BACKUP
+===========================================
+Created: 2025-08-22
+Purpose: Backup of Qwen 2.5 VL 32B vision model configuration with Fireworks provider
+
+MODEL SETTINGS:
+--------------
+Model Name: qwen/qwen2.5-vl-32b-instruct
+Provider: fireworks
+Provider Configuration: {"order": ["fireworks"], "allow_fallbacks": false}
+
+FILES MODIFIED:
+--------------
+
+1. /home/jacob/partition/LLMComputer/gemini-cli/bin/openrouter.py
+   - Added provider configuration for Qwen 2.5 VL 32B model
+   - Modification in call_chat_vision() function (lines 71-76):
+     # Add Fireworks provider specifically for Qwen 2.5 VL 32B model
+     if model == "qwen/qwen2.5-vl-32b-instruct":
+         payload["provider"] = {
+             "order": ["fireworks"],
+             "allow_fallbacks": False
+         }
+   - Same modification in call_chat() function (lines 163-168)
+
+2. /home/jacob/partition/LLMComputer/gemini-cli/bin/vnc_tools.py
+   - Line 254: First pass container analysis
+     model="qwen/qwen2.5-vl-32b-instruct"
+   - Line 327: Second pass detail analysis  
+     model="qwen/qwen2.5-vl-32b-instruct"
+   - Line 535: Fallback simple vision analysis
+     model="qwen/qwen2.5-vl-32b-instruct"
+
+HOW IT WORKS:
+------------
+1. vnc_tools.py calls call_chat_vision() with model="qwen/qwen2.5-vl-32b-instruct"
+2. openrouter.py automatically detects this model and adds Fireworks provider to payload
+3. Request is sent to OpenRouter with provider specified, ensuring Fireworks is used
+
+TO RESTORE:
+----------
+1. In vnc_tools.py, change all three model references to:
+   model="qwen/qwen2.5-vl-32b-instruct"
+   (Lines 254, 327, 535)
+
+2. Ensure openrouter.py has the provider configuration:
+   if model == "qwen/qwen2.5-vl-32b-instruct":
+       payload["provider"] = {
+           "order": ["fireworks"],
+           "allow_fallbacks": False
+       }
+
+NOTES:
+-----
+- The Fireworks provider is ONLY used for qwen/qwen2.5-vl-32b-instruct
+- Other Qwen models (like qwen/qwen-vl-plus) do not use Fireworks
+- Provider configuration is automatic when model name matches exactly

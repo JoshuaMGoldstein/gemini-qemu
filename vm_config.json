@@ -1,0 +1,16 @@
+{
+  "vm_targets": {
+    "local": {
+      "host": "127.0.0.1",
+      "vnc_port": 5901,
+      "qmp_port": 4444,
+      "description": "Puppy Linux VM"
+    },
+    "puppy": {
+      "host": "127.0.0.1", 
+      "vnc_port": 5901,
+      "qmp_port": 4444,
+      "description": "Puppy Linux VM"
+    }
+  }
+}

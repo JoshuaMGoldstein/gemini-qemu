@@ -1,0 +1,14 @@
+{
+
+  "autosave": {
+    "truncateby": 26500,
+    "truncateafter": 33000,
+    "truncatenewtag": false,
+    "minstartingtokens": 6000,
+    "additionalcompressed": 20000,
+    "compressioncharlimit": 560
+  },
+  "selectedAuthType": "gemini-api-key",
+  "toolDiscoveryCommand": "/home/jacob/partition/LLMComputer/gemini-cli/bin/get_tools",
+  "toolCallCommand": "/home/jacob/partition/LLMComputer/gemini-cli/bin/call_tool"
+}

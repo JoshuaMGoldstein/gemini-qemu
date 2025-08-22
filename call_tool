@@ -1,0 +1,91 @@
+#!/bin/bash
+
+# Tool execution script for Gemini CLI
+# Usage: call_tool <function_name>
+# Reads function arguments as JSON from stdin
+# Returns function output as JSON on stdout
+
+FUNCTION_NAME="$1"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG_FILE="$SCRIPT_DIR/vm_config.json"
+VENV_DIR="$SCRIPT_DIR/.vnc_env"
+
+# Setup virtual environment if it doesn't exist
+if [ ! -f "$VENV_DIR/bin/python" ]; then
+    # Create venv and install dependencies silently
+    python3 -m venv "$VENV_DIR" >/dev/null 2>&1
+    "$VENV_DIR/bin/pip" install --quiet --upgrade pip >/dev/null 2>&1
+    "$VENV_DIR/bin/pip" install --quiet vncdotool pillow requests python-dotenv >/dev/null 2>&1
+    
+    # Check if installation succeeded
+    if [ $? -ne 0 ]; then
+        echo '{"success": false, "error": "Failed to install dependencies. Please run: pip install vncdotool pillow requests python-dotenv"}'
+        exit 1
+    fi
+fi
+
+# Use the venv Python
+PYTHON="$VENV_DIR/bin/python"
+
+# Read JSON arguments from stdin
+ARGS=$(cat)
+
+# Function to get VNC connection details from vm_target
+get_vnc_connection() {
+    local vm_target="$1"
+    "$PYTHON" -c "
+import json
+config_file = '$CONFIG_FILE'
+with open(config_file, 'r') as f:
+    config = json.load(f)
+    target = '$vm_target' or config.get('default_target', 'local')
+    vm_info = config['vm_targets'].get(target, config['vm_targets']['local'])
+    print(f\"{vm_info['host']}:{vm_info['vnc_port']}\")
+"
+}
+
+case "$FUNCTION_NAME" in
+    "get_screenshot_description")
+        # Extract vm_target from JSON args
+        VM_TARGET=$(echo "$ARGS" | "$PYTHON" -c "import json, sys; data=json.load(sys.stdin); print(data.get('vm_target', 'local'))")
+        VNC_ADDRESS=$(get_vnc_connection "$VM_TARGET")
+        
+        # Parse host and port
+        VNC_HOST=$(echo "$VNC_ADDRESS" | cut -d: -f1)
+        VNC_PORT=$(echo "$VNC_ADDRESS" | cut -d: -f2)
+        
+        # Execute the screenshot analysis
+        "$PYTHON" "$SCRIPT_DIR/vnc_tools.py" screenshot "$VNC_HOST" "$VNC_PORT" "$VM_TARGET"
+        ;;
+        
+    "send_mouse_clicks")
+        # Extract parameters from JSON args
+        VM_TARGET=$(echo "$ARGS" | "$PYTHON" -c "import json, sys; data=json.load(sys.stdin); print(data.get('vm_target', 'local'))")
+        VNC_ADDRESS=$(get_vnc_connection "$VM_TARGET")
+        
+        # Parse host and port
+        VNC_HOST=$(echo "$VNC_ADDRESS" | cut -d: -f1)
+        VNC_PORT=$(echo "$VNC_ADDRESS" | cut -d: -f2)
+        
+        # Pass the clicks JSON to Python script
+        echo "$ARGS" | "$PYTHON" "$SCRIPT_DIR/vnc_tools.py" mouse "$VNC_HOST" "$VNC_PORT" "$VM_TARGET"
+        ;;
+        
+    "send_keyboard")
+        # Extract parameters from JSON args  
+        VM_TARGET=$(echo "$ARGS" | "$PYTHON" -c "import json, sys; data=json.load(sys.stdin); print(data.get('vm_target', 'local'))")
+        VNC_ADDRESS=$(get_vnc_connection "$VM_TARGET")
+        
+        # Parse host and port
+        VNC_HOST=$(echo "$VNC_ADDRESS" | cut -d: -f1)
+        VNC_PORT=$(echo "$VNC_ADDRESS" | cut -d: -f2)
+        
+        # Pass the keyboard actions JSON to Python script
+        echo "$ARGS" | "$PYTHON" "$SCRIPT_DIR/vnc_tools.py" keyboard "$VNC_HOST" "$VNC_PORT" "$VM_TARGET"
+        ;;
+        
+    *)
+        echo "{\"success\": false, \"error\": \"Unknown function: $FUNCTION_NAME\"}"
+        exit 1
+        ;;
+esac

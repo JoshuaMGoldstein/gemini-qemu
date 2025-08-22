@@ -1,0 +1,90 @@
+GOOGLE GEMINI 2.0 FLASH MODEL PERFORMANCE ANALYSIS
+=================================================
+Created: 2025-08-22
+Purpose: Performance analysis and configuration backup for Google Gemini 2.0 Flash vision model
+
+MODEL SETTINGS:
+--------------
+Model Name: google/gemini-2.0-flash-001
+Provider: Google (default, no provider specification needed)
+Provider Configuration: None (uses Google by default)
+
+PERFORMANCE BENCHMARKS:
+----------------------
+Test Environment: 800x600 screenshot, Puppy Linux desktop, 2GB RAM VM
+Analysis Method: Two-pass optimized analysis
+
+Timing Results:
+- Pass A (first overview): 31.9 seconds
+- Pass B (12 containers detail): 41.1 seconds  
+- Total Analysis Time: 73.3 seconds
+- Elements Detected: 284 total elements
+- Window Controls: Successfully detected (9 minimize/maximize/close buttons)
+
+Breakdown:
+- First pass: Single API call for layout analysis
+- Second pass: 12 parallel API calls (3.4 seconds average per container)
+- Container analysis: 45 containers found, 12 analyzed
+
+CONFIGURATION FILES MODIFIED:
+----------------------------
+1. /home/jacob/partition/LLMComputer/gemini-cli/bin/vnc_tools.py
+   - Line 254: First pass container analysis
+     model="google/gemini-2.0-flash-001"
+   - Line 327: Second pass detail analysis  
+     model="google/gemini-2.0-flash-001"
+   - Line 535: Fallback simple vision analysis
+     model="google/gemini-2.0-flash-001"
+
+2. /home/jacob/partition/LLMComputer/gemini-cli/bin/openrouter.py
+   - No provider configuration needed for Google models
+   - Automatic routing to Google provider
+
+OPTIMIZATIONS APPLIED:
+---------------------
+1. Batched API calls: All second-pass requests submitted simultaneously
+2. Increased worker threads: From 4 to 6 parallel workers
+3. Removed artificial delays: Eliminated 0.3s base delays
+4. concurrent.futures.wait(): Wait for all API calls to complete together
+
+PERFORMANCE COMPARISON:
+----------------------
+- Qwen 32B (Fireworks): ~50-60 seconds total (estimated from previous tests)
+- Gemini 2.0 Flash: 73.3 seconds total (measured)
+
+PROS:
+- Excellent element detection accuracy (284 elements)
+- Strong window control detection (minimize/maximize/close buttons)
+- Good text recognition and UI element classification
+- High confidence scores (0.90+ for most elements)
+
+CONS:
+- Slower than expected for a "Flash" model
+- 32-second first pass is quite slow
+- Total time >1 minute not suitable for real-time automation
+- "Flash" branding misleading for vision tasks (optimized for text)
+
+RECOMMENDATION:
+--------------
+Switch back to Qwen 32B (Fireworks) for better performance.
+Gemini 2.0 Flash appears optimized for text generation, not vision analysis.
+
+TO RESTORE:
+----------
+1. In vnc_tools.py, change all three model references to:
+   model="qwen/qwen2.5-vl-32b-instruct"
+   (Lines 254, 327, 535)
+
+2. Ensure openrouter.py has the Fireworks provider configuration:
+   if model == "qwen/qwen2.5-vl-32b-instruct":
+       payload["provider"] = {
+           "order": ["fireworks"],
+           "allow_fallbacks": False
+       }
+
+NOTES:
+-----
+- Google Gemini models route automatically without provider specification
+- The "Flash" designation seems to apply to text generation, not vision processing
+- Two-pass analysis works well but fundamental model speed is the bottleneck
+- Batching optimizations provided ~16 second improvement but not enough
