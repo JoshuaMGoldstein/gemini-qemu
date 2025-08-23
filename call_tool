@@ -39,20 +39,39 @@ if [ ! -f "$VENV_DIR/bin/python" ]; then
     fi
     
     # Install OmniParser/local vision model dependencies (large downloads):
-    # - torch, torchvision: PyTorch for deep learning models
-    # - transformers: Hugging Face transformers library  
-    # - accelerate: Accelerated training library
-    # - timm: PyTorch image models
-    # - ultralytics: YOLO object detection
-    # - easyocr: Optical character recognition
-    # - supervision: Computer vision utilities
-    # - paddlepaddle: PaddlePaddle deep learning framework
-    # - paddleocr: PaddlePaddle OCR toolkit
+    # Install in stages to avoid conflicts
     echo '{"status": "installing", "message": "Installing OmniParser dependencies (this may take several minutes)..."}' >&2
-    if ! "$VENV_DIR/bin/pip" install torch torchvision transformers accelerate timm ultralytics easyocr supervision paddlepaddle paddleocr --quiet; then
-        echo '{"status": "warning", "message": "Some OmniParser dependencies failed to install, falling back to API-only functionality"}' >&2
+    
+    # Stage 1: Core PyTorch
+    "$VENV_DIR/bin/pip" install torch torchvision --quiet
+    
+    # Stage 2: Transformers with specific version for Florence2 compatibility
+    # First upgrade pip to get better wheel support
+    "$VENV_DIR/bin/pip" install --upgrade pip --quiet
+    # Try version 4.36 which should have better wheel support
+    "$VENV_DIR/bin/pip" install transformers==4.36.0 --quiet || \
+    "$VENV_DIR/bin/pip" install transformers --quiet
+    
+    # Stage 3: Other ML dependencies  
+    "$VENV_DIR/bin/pip" install accelerate timm ultralytics einops --quiet
+    
+    # Stage 3b: Try to install flash_attn (optional but needed for some models)
+    # This often fails due to CUDA/compilation issues, so make it optional
+    echo '{"status": "installing", "message": "Attempting to install flash_attn (optional)..."}' >&2
+    if "$VENV_DIR/bin/pip" install flash-attn --no-build-isolation --quiet 2>/dev/null; then
+        echo '{"status": "info", "message": "flash_attn installed successfully"}' >&2
     else
+        echo '{"status": "warning", "message": "flash_attn installation failed, will use fallback"}' >&2
+    fi
+    
+    # Stage 4: OCR libraries
+    "$VENV_DIR/bin/pip" install easyocr supervision paddlepaddle paddleocr --quiet
+    
+    # Check if torch is installed (critical dependency)
+    if "$VENV_DIR/bin/python" -c "import torch" 2>/dev/null; then
         echo '{"status": "complete", "message": "All dependencies installed successfully"}' >&2
+    else
+        echo '{"status": "warning", "message": "Some OmniParser dependencies failed to install, falling back to API-only functionality"}' >&2
     fi
     
     # Clean up temp directories

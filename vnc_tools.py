@@ -1063,22 +1063,26 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
         # Add OmniParser to Python path
         sys.path.insert(0, str(omniparser_dir))
         
+        
         try:
+            # Try to install flash_attn if missing (last resort)
+            try:
+                import flash_attn
+            except ImportError:
+                print("🔧 flash_attn not found, attempting emergency install...", file=sys.stderr)
+                import subprocess
+                try:
+                    subprocess.run([
+                        sys.executable, "-m", "pip", "install", "flash-attn", 
+                        "--no-build-isolation", "--quiet"
+                    ], check=True, timeout=120)
+                    print("🔧 Emergency flash_attn install succeeded", file=sys.stderr)
+                except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                    print("🔧 Emergency flash_attn install failed, model may not work", file=sys.stderr)
+            
             from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
             
             print("🔍 Loading OmniParser models...", file=sys.stderr)
-            
-            # Workaround for Florence2 _supports_sdpa compatibility issue
-            import transformers
-            def patch_florence2_model(model):
-                """Add missing _supports_sdpa attribute to Florence2 models"""
-                if not hasattr(model, '_supports_sdpa'):
-                    model._supports_sdpa = False
-                # Also patch any nested modules that might need it
-                for module in model.modules():
-                    if not hasattr(module, '_supports_sdpa'):
-                        module._supports_sdpa = False
-                return model
             
             # Initialize models (following gradio_demo.py pattern)
             yolo_model = get_yolo_model(model_path=str(weights_dir / 'icon_detect' / 'model.pt'))
@@ -1086,11 +1090,6 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 model_name="florence2", 
                 model_name_or_path=str(weights_dir / 'icon_caption_florence')
             )
-            
-            # Apply Florence2 compatibility patch
-            if 'model' in caption_model_processor:
-                patch_florence2_model(caption_model_processor['model'])
-                print("🔧 Applied Florence2 compatibility patch", file=sys.stderr)
             
             print("🔍 Models loaded, processing image...", file=sys.stderr)
             
@@ -2049,8 +2048,8 @@ def _parse_windows_tsv(content: str) -> tuple:
 
 def norm_to_px(px, py, pw, ph, W, H):
     """Convert normalized coordinates to pixels with bounds clamping"""
-    x = int(round(px * (W-1))) + 1
-    y = int(round(py * (H-1))) + 4
+    x = int(round(px * (W-1)))
+    y = int(round(py * (H-1)))
     w = max(1, int(round(pw * W)))
     h = max(1, int(round(ph * H)))
     # Clamp to ROI bounds
