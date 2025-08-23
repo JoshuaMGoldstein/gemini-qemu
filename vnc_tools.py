@@ -2951,7 +2951,16 @@ def send_mouse_clicks(host: str, port: int, clicks: List[Dict], vm_target: str =
                     try:
                         x = click['x']
                         y = click['y']
-                        button = click.get('button', 1)
+                        # Convert button name/string to number for QMP
+                        button_raw = click.get('button', 1)
+                        if button_raw == 'left':
+                            button = 1
+                        elif button_raw == 'middle':
+                            button = 2
+                        elif button_raw == 'right':
+                            button = 3
+                        else:
+                            button = int(button_raw)
                         action = click.get('action', 'click')
                         
                         if action == 'click':
@@ -3082,14 +3091,6 @@ def _type_simple_text(client, text, shift_mappings):
 
 def send_keyboard_input(host: str, port: int, actions: List[Dict], vm_target: str = "local") -> Dict[str, Any]:
     """Send keyboard input via QMP or VNC"""
-    import signal
-    
-    def timeout_handler(signum, frame):
-        raise TimeoutError("Keyboard operation timed out")
-    
-    # Set 15 second timeout
-    signal.signal(signal.SIGALRM, timeout_handler)
-    signal.alarm(15)
     
     try:
         # Get QMP connection info
@@ -3228,6 +3229,9 @@ def send_keyboard_input(host: str, port: int, actions: List[Dict], vm_target: st
                     }
                     
                     # Type text using explicit shift chords - no keysyms
+                    total_chars = len(text)
+                    chars_sent = 0
+                    
                     for ch in text:
                         if ch == '\n':
                             client.keyPress('enter')
@@ -3240,7 +3244,18 @@ def send_keyboard_input(host: str, port: int, actions: List[Dict], vm_target: st
                         else:
                             # Regular character - letters, digits, unshifted symbols
                             client.keyPress(ch)
-                        time.sleep(0.01)
+                        
+                        chars_sent += 1
+                        time.sleep(0.02)  # Reduced delay for faster typing
+                        
+                        # Every 100 characters, add a small pause to let VNC catch up
+                        if chars_sent % 100 == 0:
+                            time.sleep(0.05)
+                        
+                        # Check if we've sent all characters
+                        if chars_sent >= total_chars:
+                            print(f"DEBUG: Completed typing {chars_sent}/{total_chars} characters", file=sys.stderr)
+                            break
                     
                 elif action_type == 'key':
                     key = action.get('key', '')
@@ -3272,6 +3287,7 @@ def send_keyboard_input(host: str, port: int, actions: List[Dict], vm_target: st
         except:
             pass  # Ignore disconnect errors
         
+        
         return {
             "success": True,
             "actions_executed": success_count,
@@ -3285,8 +3301,6 @@ def send_keyboard_input(host: str, port: int, actions: List[Dict], vm_target: st
             "success": False,
             "error": str(e)
         }
-    finally:
-        signal.alarm(0)  # Clear the alarm
 
 
 def main():
@@ -3307,7 +3321,7 @@ def main():
         # For other commands, extract host/port/target
         if len(sys.argv) < 5:
             print(json.dumps({"success": False, "error": "Invalid arguments"}))
-            sys.exit(1)
+            os._exit(1)  # Force immediate exit
         host = sys.argv[2]
         port = int(sys.argv[3])
         vm_target = sys.argv[4]
@@ -3323,10 +3337,30 @@ def main():
     elif command == "mouse":
         # Read clicks from stdin
         try:
-            data = json.loads(sys.stdin.read())
+            raw_input = sys.stdin.read().strip()
+            data = json.loads(raw_input)
             clicks = data.get('clicks', [])
-        except:
-            clicks = []
+            
+            # Validate that clicks is actually a list
+            if not isinstance(clicks, list):
+                print(json.dumps({
+                    "success": False, 
+                    "error": f"Invalid 'clicks' format: expected list, got {type(clicks).__name__}. Received: {repr(clicks)}"
+                }))
+                os._exit(1)  # Force immediate exit
+                
+        except json.JSONDecodeError as e:
+            print(json.dumps({
+                "success": False, 
+                "error": f"Invalid JSON format: {str(e)}. Raw input: {repr(raw_input if 'raw_input' in locals() else 'unavailable')}"
+            }))
+            os._exit(1)  # Force immediate exit
+        except Exception as e:
+            print(json.dumps({
+                "success": False, 
+                "error": f"Error parsing input: {str(e)}"
+            }))
+            os._exit(1)  # Force immediate exit
             
         result = send_mouse_clicks(host, port, clicks, vm_target)
         result["vm_target"] = vm_target
@@ -3341,56 +3375,46 @@ def main():
             raw_input = sys.stdin.read().strip()
             print(f"DEBUG: Raw stdin input: {repr(raw_input)}", file=sys.stderr)
             
-            # Parse input for either text or actions using string parsing
+            # First, validate that it's valid JSON
+            try:
+                data = json.loads(raw_input)
+            except json.JSONDecodeError as e:
+                print(json.dumps({
+                    "success": False, 
+                    "error": f"Invalid JSON format: {str(e)}. Raw input: {repr(raw_input)}"
+                }))
+                os._exit(1)  # Force immediate exit
+            
+            # Parse input for either text or actions
             actions = []
             
-            if '"actions":' in raw_input:
-                # For actions, just parse using json module since it's more complex
-                try:
-                    data = json.loads(raw_input)
-                    actions = data.get('actions', [])
-                    print(f"DEBUG: Extracted actions: {actions}", file=sys.stderr)
-                except Exception as e:
-                    print(f'{{"success": false, "error": "Failed to parse actions: {str(e)}"}}')
-                    sys.exit(1)
+            if 'actions' in data:
+                # Extract actions from parsed JSON
+                actions = data.get('actions', [])
+                
+                # Validate that actions is actually a list
+                if not isinstance(actions, list):
+                    print(json.dumps({
+                        "success": False, 
+                        "error": f"Invalid 'actions' format: expected list, got {type(actions).__name__}. Received: {repr(actions)}"
+                    }))
+                    os._exit(1)  # Force immediate exit
+                    
+                print(f"DEBUG: Extracted actions: {actions}", file=sys.stderr)
             
-            elif '"text":' in raw_input:
-                # Extract text field
-                start = raw_input.find('"text":')
-                if start != -1:
-                    start += 7
-                    while start < len(raw_input) and raw_input[start].isspace():
-                        start += 1
-                    if start < len(raw_input) and raw_input[start] == '"':
-                        start += 1
-                        end = start
-                        while end < len(raw_input):
-                            if raw_input[end] == '"':
-                                if end > start and raw_input[end-1] == '\\':
-                                    backslash_count = 0
-                                    check = end - 1
-                                    while check >= start and raw_input[check] == '\\':
-                                        backslash_count += 1
-                                        check -= 1
-                                    if backslash_count % 2 == 1:
-                                        end += 1
-                                        continue
-                                break
-                            end += 1
-                        
-                        if end < len(raw_input):
-                            text = raw_input[start:end]
-                            text = text.replace('\\n', '\n')
-                            text = text.replace('\\t', '\t')
-                            text = text.replace('\\"', '"')
-                            text = text.replace('\\!', '!')
-                            text = text.replace('\\\\', '\\')
-                            print(f"DEBUG: Extracted text: {repr(text)}", file=sys.stderr)
-                            actions = [{'action': 'type', 'text': text}]
+            elif 'text' in data:
+                # Extract text from parsed JSON
+                text = data.get('text', '')
+                if text:
+                    print(f"DEBUG: Extracted text: {repr(text)}", file=sys.stderr)
+                    actions = [{'action': 'type', 'text': text}]
             
             if not actions:
-                print('{"success": false, "error": "No text or actions found"}')
-                sys.exit(1)
+                print(json.dumps({
+                    "success": False, 
+                    "error": f"No valid 'text' or 'actions' found in input. Raw input: {repr(raw_input[:200])}"
+                }))
+                os._exit(1)  # Force immediate exit
             host = '127.0.0.1'
             port = 5901
             vm_target = 'local'
@@ -3400,11 +3424,11 @@ def main():
             result["vnc_address"] = f"{host}:{port}"
             print(json.dumps(result))
             sys.stdout.flush()
-            sys.exit(0)
+            os._exit(0)  # Force immediate exit
             
         except Exception as e:
             print(f'{{"success": false, "error": "{str(e)}"}}')
-            sys.exit(1)
+            os._exit(1)  # Force immediate exit
     
     # --stdin-text handler removed to eliminate interference
     
@@ -3412,7 +3436,7 @@ def main():
         # Read JSON from file - no bash interpretation at all
         if len(sys.argv) < 3:
             print('{"success": false, "error": "No file provided"}')
-            sys.exit(1)
+            os._exit(1)  # Force immediate exit
         
         json_file = sys.argv[2]
         try:
@@ -3483,11 +3507,11 @@ def main():
             result["vnc_address"] = f"{host}:{port}"
             print(json.dumps(result))
             sys.stdout.flush()
-            sys.exit(0)
+            os._exit(0)  # Force immediate exit
             
         except Exception as e:
             print(f'{{"success": false, "error": "{str(e)}"}}')
-            sys.exit(1)
+            os._exit(1)  # Force immediate exit
     
     elif command == "keyboard":
         # Handle base64 encoded input if provided as argument, otherwise read from stdin

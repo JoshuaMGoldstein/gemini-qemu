@@ -17,7 +17,7 @@ qemu-system-x86_64 \
     -machine q35,accel=kvm \
     -cpu host \
     -smp 2 \
-    -m 2048M \
+    -m 4096M \
     -drive file="$DISK_PATH",if=virtio,format=qcow2 \
     -cdrom "$ISO_PATH" \
     -device virtio-tablet-pci \

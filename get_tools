@@ -23,7 +23,7 @@ cat << 'EOF'
   },
   {
     "name": "send_mouse_clicks",
-    "description": "Send mouse click events to the VM at specified screen coordinates",
+    "description": "Send mouse click events to the VM at specified screen coordinates. Example: {\"clicks\": [{\"x\": 400, \"y\": 300, \"button\": 1, \"action\": \"click\"}]}",
     "parameters": {
       "type": "object",
       "properties": {
@@ -48,9 +48,9 @@ cat << 'EOF'
                 "description": "Y coordinate for click (0-based from top-left)"
               },
               "button": {
-                "type": "integer",
-                "description": "Mouse button to click",
-                "enum": [1, 2, 3]
+                "type": ["integer", "string"],
+                "description": "Mouse button to click (1=left, 2=middle, 3=right)",
+                "enum": [1, 2, 3, "1", "2", "3", "left", "right", "middle"]
               },
               "action": {
                 "type": "string",
@@ -67,7 +67,7 @@ cat << 'EOF'
   },
   {
     "name": "send_keyboard",
-    "description": "Send keyboard input (text typing and key combinations) to the VM. CRITICAL: Use exact JSON format with 'action' field BEFORE 'text'/'key' fields.",
+    "description": "Send keyboard input (text typing and key combinations) to the VM. CRITICAL: Use exact JSON format with 'action' field BEFORE 'text'/'key' fields. Example: {\"actions\": [{\"action\": \"type\", \"text\": \"hello world\"}]} or {\"text\": \"hello\"}",
     "parameters": {
       "type": "object",
       "properties": {

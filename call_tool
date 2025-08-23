@@ -133,12 +133,13 @@ case "$FUNCTION_NAME" in
         
     "send_keyboard")
         # Pass the JSON from ARGS to Python stdin
-        echo "$ARGS" | timeout 10s "$PYTHON" -W ignore "$SCRIPT_DIR/vnc_tools.py" keyboard --stdin-json
+        echo "$ARGS" | "$PYTHON" -W ignore "$SCRIPT_DIR/vnc_tools.py" keyboard --stdin-json
         EXIT_CODE=$?
         
-        # Handle timeout
-        if [ $EXIT_CODE -eq 124 ]; then
-            echo '{"success": true, "actions_executed": 1, "total_actions": 1, "errors": [], "method": "VNC", "vm_target": "local", "vnc_address": "127.0.0.1:5901"}'
+        # Handle errors
+        if [ $EXIT_CODE -ne 0 ]; then
+            # Python script already printed error JSON, just exit with error code
+            exit $EXIT_CODE
         fi
         ;;
         
