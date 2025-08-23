@@ -78,11 +78,17 @@ if [ ! -f "$VENV_DIR/bin/python" ]; then
     rm -rf "$TMPDIR" "$PIP_CACHE_DIR"
 fi
 
-# Use the venv Python
+# Use the venv Python with suppressed transformers warnings
 PYTHON="$VENV_DIR/bin/python"
+export TRANSFORMERS_VERBOSITY=error
+export HF_HUB_DISABLE_EXPERIMENTAL_WARNING=1
+export HF_HUB_DISABLE_TELEMETRY=1
 
-# Read JSON arguments from stdin
+# Read JSON arguments from stdin, provide default if empty
 ARGS=$(cat)
+if [ -z "$ARGS" ]; then
+    ARGS="{}"
+fi
 
 # Function to get VNC connection details from vm_target
 get_vnc_connection() {
@@ -108,7 +114,7 @@ case "$FUNCTION_NAME" in
         VNC_HOST=$(echo "$VNC_ADDRESS" | cut -d: -f1)
         VNC_PORT=$(echo "$VNC_ADDRESS" | cut -d: -f2)
         
-        # Execute the screenshot analysis
+        # Execute the screenshot analysis 
         "$PYTHON" "$SCRIPT_DIR/vnc_tools.py" screenshot "$VNC_HOST" "$VNC_PORT" "$VM_TARGET"
         ;;
         

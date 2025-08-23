@@ -4,6 +4,19 @@ VNC tools for Gemini CLI using vncdotool
 Handles screenshot capture, mouse clicks, and keyboard input via VNC protocol
 """
 
+import os
+# Suppress transformers warnings and auto-trust remote code before importing any ML libraries
+os.environ['TRANSFORMERS_VERBOSITY'] = 'error'
+os.environ['HF_HUB_DISABLE_EXPERIMENTAL_WARNING'] = '1'
+os.environ['HF_HUB_DISABLE_TELEMETRY'] = '1'
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+os.environ['TRUST_REMOTE_CODE'] = 'true'
+
+# Monkey patch transformers to always trust remote code
+import warnings
+warnings.filterwarnings('ignore', category=UserWarning, module='transformers')
+warnings.filterwarnings('ignore', category=FutureWarning, module='transformers')
+
 import sys
 import json
 import time
@@ -1065,6 +1078,22 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
         
         
         try:
+            # Suppress verbose model loading output
+            import os
+            os.environ["TRANSFORMERS_VERBOSITY"] = "error"
+            os.environ["TOKENIZERS_PARALLELISM"] = "false"
+            os.environ["ULTRALYTICS_SILENT"] = "1"
+            
+            # Also suppress warnings and verbose output at Python level
+            import warnings
+            warnings.filterwarnings("ignore")
+            
+            # Suppress specific library verbose output
+            import logging
+            logging.getLogger("transformers").setLevel(logging.ERROR)
+            logging.getLogger("torch").setLevel(logging.ERROR)
+            logging.getLogger("ultralytics").setLevel(logging.ERROR)
+            
             # Try to install flash_attn if missing (last resort)
             try:
                 import flash_attn
@@ -1084,12 +1113,29 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
             
             print("🔍 Loading OmniParser models...", file=sys.stderr)
             
-            # Initialize models (following gradio_demo.py pattern)
+            # Load YOLO model normally (no Florence-2 warnings)
             yolo_model = get_yolo_model(model_path=str(weights_dir / 'icon_detect' / 'model.pt'))
-            caption_model_processor = get_caption_model_processor(
-                model_name="florence2", 
-                model_name_or_path=str(weights_dir / 'icon_caption_florence')
-            )
+            
+            # Temporarily suppress stdout/stderr only during Florence-2 model loading
+            old_stdout = sys.stdout
+            old_stderr = sys.stderr
+            try:
+                # Redirect to null during Florence-2 loading
+                sys.stdout = open(os.devnull, 'w')
+                sys.stderr = open(os.devnull, 'w')
+                
+                # Load caption model (Florence-2) - this is where the warning appears
+                caption_model_processor = get_caption_model_processor(
+                    model_name="florence2", 
+                    model_name_or_path=str(weights_dir / 'icon_caption_florence')
+                )
+                
+            finally:
+                # Always restore stdout/stderr
+                sys.stdout.close()
+                sys.stderr.close()
+                sys.stdout = old_stdout
+                sys.stderr = old_stderr
             
             print("🔍 Models loaded, processing image...", file=sys.stderr)
             
@@ -1097,12 +1143,21 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
             image = Image.open(io.BytesIO(image_bytes))
             width, height = image.size
             
-            print("🔍 Using dual approach: full-image text detection + 4-quadrant UI detection...", file=sys.stderr)
+            print("🔍 Using 2-pass hierarchical detection: windows → window buttons...", file=sys.stderr)
             
-            # PHASE 1: Full-image text detection for complete lines
-            print("🔍 Phase 1: Full-image text detection...", file=sys.stderr)
+            # PASS 1: Detect windows and general elements from full image
+            print("🔍 Pass 1: Detecting windows and general elements from full image...", file=sys.stderr)
             
-            # Run OCR on full image for complete text lines
+            # Calculate overlay ratio and drawing config for full image
+            box_overlay_ratio = width / 3200
+            draw_bbox_config = {
+                'text_scale': 0.8 * box_overlay_ratio,
+                'text_thickness': max(int(2 * box_overlay_ratio), 1),
+                'text_padding': max(int(3 * box_overlay_ratio), 2),
+                'thickness': max(int(3 * box_overlay_ratio), 2)
+            }
+            
+            # Run OCR on full image 
             (full_text, full_ocr_bbox), _ = check_ocr_box(
                 image, 
                 display_img=False, 
@@ -1111,46 +1166,63 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 use_paddleocr=False
             )
             
-            # Convert full-image OCR results to text elements
-            full_text_elements = []
-            if full_text and full_ocr_bbox:
-                for i, (text_content, bbox) in enumerate(zip(full_text, full_ocr_bbox)):
-                    if text_content.strip():  # Only non-empty text
-                        # Convert pixel coordinates to ratios
-                        x1, y1, x2, y2 = bbox
-                        full_text_elements.append({
-                            'type': 'text',
-                            'bbox': [x1/width, y1/height, x2/width, y2/height],
-                            'interactivity': False,
-                            'content': text_content.strip(),
-                            'source': 'full_image_ocr',
-                            'quadrant': 'full_image'
-                        })
+            # Get SOM labeled image and parsed content for full image (Pass 1)
+            try:
+                dino_labeled_img, label_coordinates, pass1_elements = get_som_labeled_img(
+                    image, 
+                    yolo_model, 
+                    BOX_TRESHOLD=0.05, 
+                    output_coord_in_ratio=True, 
+                    ocr_bbox=full_ocr_bbox or [], 
+                    draw_bbox_config=draw_bbox_config, 
+                    caption_model_processor=caption_model_processor, 
+                    ocr_text=full_text or [], 
+                    use_local_semantics=True, 
+                    iou_threshold=0.7, 
+                    imgsz=640
+                )
+                
+                if label_coordinates is None:
+                    label_coordinates = {}
+                if pass1_elements is None:
+                    pass1_elements = []
+                
+            except Exception as e:
+                print(f"❌ Pass 1 OmniParser error: {e}", file=sys.stderr)
+                return {"success": False, "error": f"Pass 1 OmniParser error: {e}"}
             
-            print(f"🔍 Phase 1 result: {len(full_text_elements)} complete text elements", file=sys.stderr)
+            print(f"🔍 Pass 1 result: {len(pass1_elements)} elements detected", file=sys.stderr)
             
-            # PHASE 2: 4-quadrant UI element detection for precise clicking
-            print("🔍 Phase 2: 4-quadrant UI element detection...", file=sys.stderr)
+            # PASS 2: Detect window controls by cropping individual windows
+            print("🔍 Pass 2: Detecting window controls from individual window crops...", file=sys.stderr)
             
-            # Partition image into 4 overlapping quadrants for UI elements only
-            OVERLAP = 50  # pixels overlap to catch UI elements spanning boundaries
-            quadrants = [
-                ("top_left", image.crop((0, 0, width//2 + OVERLAP, height//2 + OVERLAP)), (0, 0)),
-                ("top_right", image.crop((width//2 - OVERLAP, 0, width, height//2 + OVERLAP)), (width//2 - OVERLAP, 0)),
-                ("bottom_left", image.crop((0, height//2 - OVERLAP, width//2 + OVERLAP, height)), (0, height//2 - OVERLAP)),
-                ("bottom_right", image.crop((width//2 - OVERLAP, height//2 - OVERLAP, width, height)), (width//2 - OVERLAP, height//2 - OVERLAP))
-            ]
+            # Build window hypotheses from Pass 1 elements
+            windows = _build_window_hypotheses(pass1_elements, width, height)
+            print(f"🔍 Pass 2: Found {len(windows)} window candidates for detailed analysis", file=sys.stderr)
             
-            all_ui_elements = []
+            # PASS 2: Process each window individually to detect buttons
+            print("🔍 Pass 2: Processing individual windows to detect buttons and controls...", file=sys.stderr)
+            
+            all_window_elements = []
             all_coordinates = {}
             element_count = 0
             
-            # Process each quadrant for UI elements only
-            for quad_name, quad_image, (offset_x, offset_y) in quadrants:
-                print(f"🔍 Processing {quad_name} quadrant...", file=sys.stderr)
+            for i, window in enumerate(windows):
+                win_x1, win_y1, win_x2, win_y2 = window['x1'], window['y1'], window['x2'], window['y2']
+                win_width = win_x2 - win_x1
+                win_height = win_y2 - win_y1
                 
-                # Calculate overlay ratio and drawing config for this quadrant
-                box_overlay_ratio = quad_image.size[0] / 3200
+                # Skip very small windows (likely noise)
+                if win_width < 50 or win_height < 50:
+                    continue
+                    
+                print(f"🔍 Processing window {i+1}/{len(windows)}: {window['title']} at ({win_x1}, {win_y1}) - {win_width}x{win_height}", file=sys.stderr)
+                
+                # Crop the window from the full image
+                window_image = image.crop((win_x1, win_y1, win_x2, win_y2))
+                
+                # Calculate drawing config for this window
+                box_overlay_ratio = win_width / 3200
                 draw_bbox_config = {
                     'text_scale': 0.8 * box_overlay_ratio,
                     'text_thickness': max(int(2 * box_overlay_ratio), 1),
@@ -1158,89 +1230,91 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                     'thickness': max(int(3 * box_overlay_ratio), 1),
                 }
                 
-                # Run minimal OCR for SOM compatibility but focus on UI elements
-                (quad_text, quad_ocr_bbox), _ = check_ocr_box(
-                    quad_image, 
-                    display_img=False, 
-                    output_bb_format='xyxy', 
-                    easyocr_args={'text_threshold': 0.9},  # Very high threshold - we don't want text, just UI elements
-                    use_paddleocr=False
-                )
-                
-                # Get SOM labeled image and parsed content for quadrant (UI elements focused)
+                # Run OCR on the window crop
                 try:
-                    quad_dino_labeled_img, quad_label_coordinates, quad_parsed_content_list = get_som_labeled_img(
-                        quad_image, 
+                    (window_text, window_ocr_bbox), _ = check_ocr_box(
+                        window_image, 
+                        display_img=False, 
+                        output_bb_format='xyxy', 
+                        easyocr_args={'text_threshold': 0.7},
+                        use_paddleocr=False
+                    )
+                except Exception as e:
+                    print(f"⚠️ OCR failed for window {i+1}: {e}", file=sys.stderr)
+                    window_text = []
+                    window_ocr_bbox = []
+                
+                # Run OmniParser on the cropped window
+                try:
+                    win_dino_labeled_img, win_label_coordinates, win_parsed_content_list = get_som_labeled_img(
+                        window_image, 
                         yolo_model, 
-                        BOX_TRESHOLD=0.05, 
+                        BOX_TRESHOLD=0.03,  # Lower threshold for window buttons
                         output_coord_in_ratio=True, 
-                        ocr_bbox=quad_ocr_bbox or [],  # Provide OCR boxes for compatibility
+                        ocr_bbox=window_ocr_bbox or [], 
                         draw_bbox_config=draw_bbox_config, 
                         caption_model_processor=caption_model_processor, 
-                        ocr_text=quad_text or [],  # Provide OCR text for compatibility
+                        ocr_text=window_text or [], 
                         use_local_semantics=True, 
-                        iou_threshold=0.7, 
+                        iou_threshold=0.5,  # Lower threshold to catch more buttons
                         scale_img=False, 
                         batch_size=128
                     )
                     
                     # Handle None returns
-                    if quad_label_coordinates is None:
-                        quad_label_coordinates = {}
-                    if quad_parsed_content_list is None:
-                        quad_parsed_content_list = []
-                    
+                    if win_label_coordinates is None:
+                        win_label_coordinates = {}
+                    if win_parsed_content_list is None:
+                        win_parsed_content_list = []
+                        
                 except Exception as e:
-                    print(f"❌ OmniParser error processing {quad_name}: {e}", file=sys.stderr)
-                    # Continue with empty results for this quadrant
-                    quad_dino_labeled_img = ""
-                    quad_label_coordinates = {}
-                    quad_parsed_content_list = []
+                    print(f"❌ OmniParser error processing window {i+1}: {e}", file=sys.stderr)
+                    win_label_coordinates = {}
+                    win_parsed_content_list = []
                 
-                # Filter out any text elements from quadrant processing - we only want icons
-                quad_parsed_content_list = [e for e in quad_parsed_content_list if e.get('type') == 'icon']
-                
-                # Adjust coordinates back to full image space and add quadrant info
-                for i, element in enumerate(quad_parsed_content_list):
-                    # Adjust bbox coordinates
+                # Convert window-relative coordinates back to full image coordinates
+                for element in win_parsed_content_list:
                     if 'bbox' in element:
                         bbox = element['bbox']
-                        # Convert from quadrant ratios to full image ratios
-                        quad_width, quad_height = quad_image.size
-                        full_x1 = (bbox[0] * quad_width + offset_x) / width
-                        full_y1 = (bbox[1] * quad_height + offset_y) / height  
-                        full_x2 = (bbox[2] * quad_width + offset_x) / width
-                        full_y2 = (bbox[3] * quad_height + offset_y) / height
-                        element['bbox'] = [full_x1, full_y1, full_x2, full_y2]
-                        element['quadrant'] = quad_name
+                        # Convert from window ratios to full image coordinates
+                        global_x1 = win_x1 + (bbox[0] * win_width)
+                        global_y1 = win_y1 + (bbox[1] * win_height)  
+                        global_x2 = win_x1 + (bbox[2] * win_width)
+                        global_y2 = win_y1 + (bbox[3] * win_height)
+                        
+                        # Convert to full image ratios
+                        element['bbox'] = [
+                            global_x1 / width, 
+                            global_y1 / height,
+                            global_x2 / width, 
+                            global_y2 / height
+                        ]
+                        element['window_id'] = i
+                        element['window_title'] = window['title']
                     
-                    all_ui_elements.append(element)
+                    all_window_elements.append(element)
                 
-                # Adjust label coordinates
-                for key, coords in quad_label_coordinates.items():
-                    global_key = f"{quad_name}_{key}"
-                    # Convert quadrant coordinates to full image coordinates
-                    quad_width, quad_height = quad_image.size
-                    full_coords = [
-                        (coords[0] * quad_width + offset_x) / width,
-                        (coords[1] * quad_height + offset_y) / height,
-                        coords[2] * quad_width / width,  # width ratio
-                        coords[3] * quad_height / height  # height ratio
+                # Convert window label coordinates to global coordinates
+                for key, coords in win_label_coordinates.items():
+                    global_key = f"win{i}_{key}"
+                    global_x = win_x1 + (coords[0] * win_width)
+                    global_y = win_y1 + (coords[1] * win_height)
+                    global_coords = [
+                        global_x / width,
+                        global_y / height,
+                        coords[2] * win_width / width,  # width ratio
+                        coords[3] * win_height / height  # height ratio
                     ]
-                    all_coordinates[global_key] = full_coords
+                    all_coordinates[global_key] = global_coords
                 
-                element_count += len(quad_parsed_content_list)
-                print(f"🔍 {quad_name}: found {len(quad_parsed_content_list)} UI elements", file=sys.stderr)
+                element_count += len(win_parsed_content_list)
+                print(f"🔍 Window {i+1}: found {len(win_parsed_content_list)} elements", file=sys.stderr)
             
-            print(f"🔍 Phase 2 result: {element_count} total UI elements from 4 quadrants", file=sys.stderr)
+            print(f"🔍 Pass 2 complete: {element_count} total elements from {len(windows)} windows", file=sys.stderr)
             
-            # Remove duplicate UI elements from overlapping regions
-            print("🔍 Removing UI element duplicates from overlapping regions...", file=sys.stderr)
-            deduplicated_ui_elements = _remove_duplicate_elements(all_ui_elements)
-            
-            # Combine full-image text with deduplicated UI elements
-            print("🔍 Combining full-image text with quadrant UI elements...", file=sys.stderr)
-            all_elements = full_text_elements + deduplicated_ui_elements
+            # Combine Pass 1 elements (windows, text) with Pass 2 elements (window buttons)
+            print("🔍 Combining Pass 1 and Pass 2 elements...", file=sys.stderr)
+            all_elements = pass1_elements + all_window_elements
             
             # STAGE 1: Detect UI patterns from the full image
             print("🔍 Stage 1: Analyzing UI patterns...", file=sys.stderr)
@@ -1263,6 +1337,21 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
             print(f"🔍 dino_labeled_img type: {type(dino_labeled_img)}", file=sys.stderr)
             print(f"🔍 label_coordinates type: {type(label_coordinates)}, content: {label_coordinates}", file=sys.stderr)
             print(f"🔍 parsed_content_list type: {type(parsed_content_list)}, content: {parsed_content_list}", file=sys.stderr)
+            
+            # Check for any close-like elements in raw data
+            close_candidates = []
+            for i, elem in enumerate(parsed_content_list):
+                content = str(elem.get('content', '')).lower()
+                if any(keyword in content for keyword in ['close', 'x', '×', 'exit', 'min', 'max']):
+                    close_candidates.append(f"Element {i}: {elem}")
+                    print(f"🔍 CLOSE/MIN/MAX CANDIDATE {i}: {elem}", file=sys.stderr)
+            
+            if not close_candidates:
+                print(f"🔍 NO WINDOW CONTROL CANDIDATES found in {len(parsed_content_list)} raw elements", file=sys.stderr)
+                # Show first few elements to see what is being detected
+                print(f"🔍 FIRST 5 RAW ELEMENTS:", file=sys.stderr)
+                for i, elem in enumerate(parsed_content_list[:5]):
+                    print(f"🔍   {i}: {elem}", file=sys.stderr)
             
             return {
                 "success": True, 
@@ -1287,11 +1376,9 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
         print(f"❌ OmniParser error: {e}", file=sys.stderr)
         return {"success": False, "error": str(e)}
 
-def _parse_omniparser_result(result, width=800, height=600) -> str:
-    """Parse OmniParser output into clickable elements format with proper pixel coordinates"""
+def _parse_omniparser_result(result, width=800, height=600) -> dict:
+    """Parse OmniParser output into hierarchical JSON structure grouped by windows"""
     try:
-        elements = []
-        
         # New format from our updated OmniParser function
         if isinstance(result, dict) and "parsed_content_list" in result:
             parsed_content_list = result["parsed_content_list"]
@@ -1301,9 +1388,26 @@ def _parse_omniparser_result(result, width=800, height=600) -> str:
             
             print(f"🔍 Parsing {len(parsed_content_list)} OmniParser elements with {len(relationships)} relationships", file=sys.stderr)
             
+            # Create hierarchical structure: desktop -> windows -> elements
+            desktop_structure = {
+                "desktop": {
+                    "taskbar": [],
+                    "background_elements": []
+                },
+                "windows": {},
+                "global_controls": [],
+                "summary": {
+                    "total_elements": len(parsed_content_list),
+                    "total_windows": 0
+                }
+            }
+            
+            # Process each element and assign to appropriate window or desktop area
             for i, element in enumerate(parsed_content_list):
                 element_type = element.get('type', 'unknown')
                 content = element.get('content', f'{element_type}_{i}')
+                window_id = element.get('window_id')
+                window_title = element.get('window_title', 'Unknown Window')
                 
                 # Get coordinates from element bbox if available
                 bbox = element.get('bbox')
@@ -1317,37 +1421,58 @@ def _parse_omniparser_result(result, width=800, height=600) -> str:
                     center_x_px = int(center_x_ratio * width)
                     center_y_px = int(center_y_ratio * height)
                     
-                    # Check if this element has a relationship for better description
-                    enhanced_desc = None
-                    for rel_key, rel_info in relationships.items():
-                        if rel_info.get("element") == element:
-                            action = rel_info.get("action", "click")
-                            target_name = rel_info.get("target_name", content)
-                            if action == "close_window":
-                                enhanced_desc = f"close_button:close {target_name} window - click ({center_x_px}, {center_y_px})"
-                            elif action == "close_tab":
-                                enhanced_desc = f"close_button:close {target_name} tab - click ({center_x_px}, {center_y_px})"
-                            break
+                    # Create element object
+                    element_obj = {
+                        "type": element_type,
+                        "content": content,
+                        "coordinates": {
+                            "x": center_x_px,
+                            "y": center_y_px,
+                            "bbox": [int(x1 * width), int(y1 * height), int(x2 * width), int(y2 * height)]
+                        },
+                        "is_interactive": element.get('interactivity', True),
+                        "source": element.get('source', 'omniparser')
+                    }
                     
-                    # Create clickable element description with pixel coordinates
-                    if enhanced_desc:
-                        desc = enhanced_desc
-                    elif element_type == 'text':
-                        desc = f"text:{content} - click ({center_x_px}, {center_y_px})"
-                    elif element_type == 'icon':
-                        desc = f"icon:{content} - click ({center_x_px}, {center_y_px})"
+                    print(f"🔍 Element {i}: {element_type}:{content} - click ({center_x_px}, {center_y_px}) (window: {window_title})", file=sys.stderr)
+                    
+                    # Classify and assign to appropriate container
+                    if window_id is not None:
+                        # Element belongs to a specific window
+                        window_key = f"window_{window_id}"
+                        if window_key not in desktop_structure["windows"]:
+                            desktop_structure["windows"][window_key] = {
+                                "title": window_title,
+                                "window_id": window_id,
+                                "controls": [],
+                                "content": [],
+                                "buttons": []
+                            }
+                        
+                        # Categorize element within the window
+                        if any(keyword in content.lower() for keyword in ['close', 'minimize', 'maximize', 'x', '×']):
+                            desktop_structure["windows"][window_key]["controls"].append(element_obj)
+                        elif element_type == 'icon' and any(keyword in content.lower() for keyword in ['button']):
+                            desktop_structure["windows"][window_key]["buttons"].append(element_obj)
+                        else:
+                            desktop_structure["windows"][window_key]["content"].append(element_obj)
+                            
                     else:
-                        desc = f"{element_type}:{content} - click ({center_x_px}, {center_y_px})"
-                    
-                    elements.append(desc)
-                    print(f"🔍 Element {i}: {desc} (ratio: {center_x_ratio:.3f}, {center_y_ratio:.3f})", file=sys.stderr)
+                        # Element is not assigned to a specific window
+                        if any(keyword in content.lower() for keyword in ['menu', 'places', 'start', 'taskbar', 'browser', 'firefox']):
+                            desktop_structure["desktop"]["taskbar"].append(element_obj)
+                        elif any(keyword in content.lower() for keyword in ['close', 'minimize', 'maximize']):
+                            desktop_structure["global_controls"].append(element_obj)
+                        else:
+                            desktop_structure["desktop"]["background_elements"].append(element_obj)
                 else:
                     # No coordinates available
-                    desc = f"{element_type}:{content} - (no coordinates)"
-                    elements.append(desc)
-                    print(f"🔍 Element {i}: {desc}", file=sys.stderr)
+                    print(f"🔍 Element {i}: {element_type}:{content} - (no coordinates)", file=sys.stderr)
             
-            return "\n".join(elements)
+            # Update summary
+            desktop_structure["summary"]["total_windows"] = len(desktop_structure["windows"])
+            
+            return desktop_structure
         
         # Fallback for old format
         elif isinstance(result, (tuple, list)) and len(result) >= 2:
@@ -2746,22 +2871,26 @@ def analyze_screenshot(host: str, port: int, vm_target: str = "local") -> Dict[s
         
         if omniparser_result.get("success"):
             print("✅ Using local OmniParser v2.0 for GUI detection", file=sys.stderr)
-            vision_description = _parse_omniparser_result(omniparser_result.get("result"), width, height)
-            # Add screen dimensions
-            vision_description = f"{width}x{height}|OmniParser GUI Detection\n\n{vision_description}"
+            hierarchical_gui_data = _parse_omniparser_result(omniparser_result.get("result"), width, height)
         else:
             print("❌ Local OmniParser failed, trying Replicate API...", file=sys.stderr)
             omniparser_result = _call_omniparser_replicate(image_bytes)
             
             if omniparser_result.get("success"):
                 print("✅ Using OmniParser v2.0 via Replicate API for GUI detection", file=sys.stderr)
-                vision_description = _parse_omniparser_result(omniparser_result.get("result"), width, height)
-                # Add screen dimensions
-                vision_description = f"{width}x{height}|OmniParser GUI Detection\n\n{vision_description}"
+                hierarchical_gui_data = _parse_omniparser_result(omniparser_result.get("result"), width, height)
             else:
                 print("❌ Both local and Replicate OmniParser failed, falling back to OpenRouter TSV system", file=sys.stderr)
                 # Fallback to window/taskbar TSV system
-                vision_description = _analyze_windows_and_taskbars(image_bytes, width, height)
+                fallback_description = _analyze_windows_and_taskbars(image_bytes, width, height)
+                # Create simple hierarchical structure for fallback
+                hierarchical_gui_data = {
+                    "desktop": {"taskbar": [], "background_elements": []},
+                    "windows": {},
+                    "global_controls": [],
+                    "summary": {"total_elements": 0, "total_windows": 0},
+                    "fallback_description": fallback_description
+                }
         
         return {
             "success": True,
@@ -2770,7 +2899,7 @@ def analyze_screenshot(host: str, port: int, vm_target: str = "local") -> Dict[s
                 "height": height,
                 "description": "QMP Desktop Screenshot"
             },
-            "vision_analysis": vision_description,
+            "gui_hierarchy": hierarchical_gui_data,
             "vm_target": vm_target,
             "method": "QMP"
         }
