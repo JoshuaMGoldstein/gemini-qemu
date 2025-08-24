@@ -1049,14 +1049,20 @@ def _call_omniparser_replicate(image_bytes: bytes) -> dict:
 
 def _call_omniparser_vision(image_bytes: bytes) -> dict:
     """Call OmniParser v2.0 for GUI element detection using local installation"""
+    import sys
+    import tempfile
+    import os
+    import io
+    from pathlib import Path
+    from PIL import Image
+    import torch
+    from contextlib import redirect_stdout
+    
+    # Redirect all stdout to stderr for the entire function to avoid JSON pollution
+    original_stdout = sys.stdout
+    sys.stdout = sys.stderr
+    
     try:
-        import tempfile
-        import os
-        import sys
-        import io
-        from pathlib import Path
-        from PIL import Image
-        import torch
         
         print("🔍 Attempting OmniParser v2.0 local detection...", file=sys.stderr)
         
@@ -1067,10 +1073,12 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
         
         if not omniparser_dir.exists():
             print(f"❌ OmniParser directory not found at {omniparser_dir}", file=sys.stderr)
+            sys.stdout = original_stdout
             return {"success": False, "error": "OmniParser directory not found"}
         
         if not weights_dir.exists():
             print(f"❌ OmniParser weights not found at {weights_dir}", file=sys.stderr)
+            sys.stdout = original_stdout
             return {"success": False, "error": "OmniParser weights not found"}
         
         # Add OmniParser to Python path
@@ -1110,11 +1118,13 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                     print("🔧 Emergency flash_attn install failed, model may not work", file=sys.stderr)
             
             from util.utils import check_ocr_box, get_yolo_model, get_caption_model_processor, get_som_labeled_img
+            from contextlib import redirect_stdout
             
             print("🔍 Loading OmniParser models...", file=sys.stderr)
             
-            # Load YOLO model normally (no Florence-2 warnings)
-            yolo_model = get_yolo_model(model_path=str(weights_dir / 'icon_detect' / 'model.pt'))
+            # Load YOLO model (redirect stdout to avoid JSON pollution)
+            with redirect_stdout(sys.stderr):
+                yolo_model = get_yolo_model(model_path=str(weights_dir / 'icon_detect' / 'model.pt'))
             
             # Temporarily suppress stdout/stderr only during Florence-2 model loading
             old_stdout = sys.stdout
@@ -1157,30 +1167,32 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 'thickness': max(int(3 * box_overlay_ratio), 2)
             }
             
-            # Run OCR on full image 
-            (full_text, full_ocr_bbox), _ = check_ocr_box(
-                image, 
-                display_img=False, 
-                output_bb_format='xyxy', 
-                easyocr_args={'text_threshold': 0.3}, 
-                use_paddleocr=False
-            )
+            # Run OCR on full image (redirect stdout to stderr to avoid JSON pollution)
+            with redirect_stdout(sys.stderr):
+                (full_text, full_ocr_bbox), _ = check_ocr_box(
+                    image, 
+                    display_img=False, 
+                    output_bb_format='xyxy', 
+                    easyocr_args={'text_threshold': 0.3}, 
+                    use_paddleocr=False
+                )
             
             # Get SOM labeled image and parsed content for full image (Pass 1)
             try:
-                dino_labeled_img, label_coordinates, pass1_elements = get_som_labeled_img(
-                    image, 
-                    yolo_model, 
-                    BOX_TRESHOLD=0.05, 
-                    output_coord_in_ratio=True, 
-                    ocr_bbox=full_ocr_bbox or [], 
-                    draw_bbox_config=draw_bbox_config, 
-                    caption_model_processor=caption_model_processor, 
-                    ocr_text=full_text or [], 
-                    use_local_semantics=True, 
-                    iou_threshold=0.7, 
-                    imgsz=640
-                )
+                with redirect_stdout(sys.stderr):
+                    dino_labeled_img, label_coordinates, pass1_elements = get_som_labeled_img(
+                        image, 
+                        yolo_model, 
+                        BOX_TRESHOLD=0.05, 
+                        output_coord_in_ratio=True, 
+                        ocr_bbox=full_ocr_bbox or [], 
+                        draw_bbox_config=draw_bbox_config, 
+                        caption_model_processor=caption_model_processor, 
+                        ocr_text=full_text or [], 
+                        use_local_semantics=True, 
+                        iou_threshold=0.7, 
+                        imgsz=640
+                    )
                 
                 if label_coordinates is None:
                     label_coordinates = {}
@@ -1189,6 +1201,7 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 
             except Exception as e:
                 print(f"❌ Pass 1 OmniParser error: {e}", file=sys.stderr)
+                sys.stdout = original_stdout
                 return {"success": False, "error": f"Pass 1 OmniParser error: {e}"}
             
             print(f"🔍 Pass 1 result: {len(pass1_elements)} elements detected", file=sys.stderr)
@@ -1230,23 +1243,25 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                     'thickness': max(int(3 * box_overlay_ratio), 1),
                 }
                 
-                # Run OCR on the window crop
+                # Run OCR on the window crop (redirect stdout to stderr)
                 try:
-                    (window_text, window_ocr_bbox), _ = check_ocr_box(
-                        window_image, 
-                        display_img=False, 
-                        output_bb_format='xyxy', 
-                        easyocr_args={'text_threshold': 0.7},
-                        use_paddleocr=False
-                    )
+                    with redirect_stdout(sys.stderr):
+                        (window_text, window_ocr_bbox), _ = check_ocr_box(
+                            window_image, 
+                            display_img=False, 
+                            output_bb_format='xyxy', 
+                            easyocr_args={'text_threshold': 0.7},
+                            use_paddleocr=False
+                        )
                 except Exception as e:
                     print(f"⚠️ OCR failed for window {i+1}: {e}", file=sys.stderr)
                     window_text = []
                     window_ocr_bbox = []
                 
-                # Run OmniParser on the cropped window
+                # Run OmniParser on the cropped window (redirect stdout to stderr)
                 try:
-                    win_dino_labeled_img, win_label_coordinates, win_parsed_content_list = get_som_labeled_img(
+                    with redirect_stdout(sys.stderr):
+                        win_dino_labeled_img, win_label_coordinates, win_parsed_content_list = get_som_labeled_img(
                         window_image, 
                         yolo_model, 
                         BOX_TRESHOLD=0.03,  # Lower threshold for window buttons
@@ -1353,6 +1368,7 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 for i, elem in enumerate(parsed_content_list[:5]):
                     print(f"🔍   {i}: {elem}", file=sys.stderr)
             
+            sys.stdout = original_stdout
             return {
                 "success": True, 
                 "result": {
@@ -1366,6 +1382,7 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
                 
         except ImportError as e:
             print(f"❌ Failed to import OmniParser modules: {e}", file=sys.stderr)
+            sys.stdout = original_stdout
             return {"success": False, "error": f"Failed to import OmniParser modules: {e}"}
         finally:
             # Remove from Python path
@@ -1375,6 +1392,9 @@ def _call_omniparser_vision(image_bytes: bytes) -> dict:
     except Exception as e:
         print(f"❌ OmniParser error: {e}", file=sys.stderr)
         return {"success": False, "error": str(e)}
+    finally:
+        # Always restore original stdout
+        sys.stdout = original_stdout
 
 def _parse_omniparser_result(result, width=800, height=600) -> dict:
     """Parse OmniParser output into hierarchical JSON structure grouped by windows"""
@@ -1405,9 +1425,12 @@ def _parse_omniparser_result(result, width=800, height=600) -> dict:
             # Process each element and assign to appropriate window or desktop area
             for i, element in enumerate(parsed_content_list):
                 element_type = element.get('type', 'unknown')
-                content = element.get('content', f'{element_type}_{i}')
+                # Ensure content is a string and doesn't break JSON
+                raw_content = element.get('content', f'{element_type}_{i}')
+                content = str(raw_content) if raw_content is not None else f'{element_type}_{i}'
                 window_id = element.get('window_id')
-                window_title = element.get('window_title', 'Unknown Window')
+                raw_window_title = element.get('window_title', 'Unknown Window')
+                window_title = str(raw_window_title) if raw_window_title is not None else 'Unknown Window'
                 
                 # Get coordinates from element bbox if available
                 bbox = element.get('bbox')
@@ -1513,14 +1536,36 @@ def _parse_omniparser_result(result, width=800, height=600) -> dict:
                         
                         elements.append(f"{elem_type}:{desc} - click ({center_x}, {center_y})")
         
-        if elements:
-            return "\n".join(elements)
-        else:
-            return "No elements detected by OmniParser"
+        # Return empty structure if no elements found
+        return {
+            "desktop": {
+                "taskbar": [],
+                "background_elements": []
+            },
+            "windows": {},
+            "global_controls": [],
+            "summary": {
+                "total_elements": len(elements) if 'elements' in locals() else 0,
+                "total_windows": 0
+            }
+        }
             
     except Exception as e:
         print(f"❌ Failed to parse OmniParser result: {e}", file=sys.stderr)
-        return "Failed to parse OmniParser output"
+        # Return empty structure on error
+        return {
+            "desktop": {
+                "taskbar": [],
+                "background_elements": []
+            },
+            "windows": {},
+            "global_controls": [],
+            "summary": {
+                "total_elements": 0,
+                "total_windows": 0,
+                "error": str(e)
+            }
+        }
 
 def _call_openrouter_vision(image_bytes: bytes) -> str:
     """Call OpenRouter vision API using two-pass TSV system"""
@@ -2872,6 +2917,15 @@ def analyze_screenshot(host: str, port: int, vm_target: str = "local") -> Dict[s
         if omniparser_result.get("success"):
             print("✅ Using local OmniParser v2.0 for GUI detection", file=sys.stderr)
             hierarchical_gui_data = _parse_omniparser_result(omniparser_result.get("result"), width, height)
+            # Ensure we always have a dict
+            if not isinstance(hierarchical_gui_data, dict):
+                hierarchical_gui_data = {
+                    "desktop": {"taskbar": [], "background_elements": []},
+                    "windows": {},
+                    "global_controls": [],
+                    "summary": {"total_elements": 0, "total_windows": 0},
+                    "parse_error": "Invalid response from parser"
+                }
         else:
             print("❌ Local OmniParser failed, trying Replicate API...", file=sys.stderr)
             omniparser_result = _call_omniparser_replicate(image_bytes)
@@ -2879,17 +2933,28 @@ def analyze_screenshot(host: str, port: int, vm_target: str = "local") -> Dict[s
             if omniparser_result.get("success"):
                 print("✅ Using OmniParser v2.0 via Replicate API for GUI detection", file=sys.stderr)
                 hierarchical_gui_data = _parse_omniparser_result(omniparser_result.get("result"), width, height)
+                # Ensure we always have a dict
+                if not isinstance(hierarchical_gui_data, dict):
+                    hierarchical_gui_data = {
+                        "desktop": {"taskbar": [], "background_elements": []},
+                        "windows": {},
+                        "global_controls": [],
+                        "summary": {"total_elements": 0, "total_windows": 0},
+                        "parse_error": "Invalid response from parser"
+                    }
             else:
                 print("❌ Both local and Replicate OmniParser failed, falling back to OpenRouter TSV system", file=sys.stderr)
                 # Fallback to window/taskbar TSV system
                 fallback_description = _analyze_windows_and_taskbars(image_bytes, width, height)
+                # Ensure fallback_description is a safe string
+                safe_description = str(fallback_description) if fallback_description is not None else "No description available"
                 # Create simple hierarchical structure for fallback
                 hierarchical_gui_data = {
                     "desktop": {"taskbar": [], "background_elements": []},
                     "windows": {},
                     "global_controls": [],
                     "summary": {"total_elements": 0, "total_windows": 0},
-                    "fallback_description": fallback_description
+                    "fallback_description": safe_description
                 }
         
         return {
