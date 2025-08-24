@@ -8,5 +8,5 @@ for it to be intelligent about it - perhaps modify system prompt to gemini to te
 always take a screenshot after doing an action to verify it worked
 
 API KEYS:  will use local model for screenshot detection, but there's a fallback for replicate that
-can be used by exporting environment variable REPLICATE_API_TOKEN
+can be used by exporting environment variable REPLICATE_API_TOKEN.
 
