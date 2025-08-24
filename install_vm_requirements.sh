@@ -52,17 +52,17 @@ install_qemu() {
     
     case $DISTRO in
         arch|endeavouros|manjaro)
-            sudo pacman -S --needed --noconfirm qemu-full edk2-ovmf python python-pip python-virtualenv curl wget
+            sudo pacman -S --needed --noconfirm qemu-full edk2-ovmf python python-pip python-virtualenv curl wget git gcc make cmake libgl mesa tk python-opencv tesseract tesseract-data-eng
             ;;
         ubuntu|debian|linuxmint)
             sudo apt update
-            sudo apt install -y qemu-system qemu-utils ovmf python3 python3-pip python3-venv curl wget
+            sudo apt install -y qemu-system qemu-utils ovmf python3 python3-pip python3-venv python3-dev curl wget git gcc g++ make cmake libgl1-mesa-glx libglib2.0-0 libsm6 libxext6 libxrender-dev libgomp1 python3-tk tesseract-ocr libtesseract-dev
             ;;
         fedora|centos|rhel)
-            sudo dnf install -y qemu qemu-kvm edk2-ovmf python3 python3-pip python3-virtualenv curl wget
+            sudo dnf install -y qemu qemu-kvm edk2-ovmf python3 python3-pip python3-virtualenv python3-devel curl wget git gcc gcc-c++ make cmake mesa-libGL python3-tkinter tesseract tesseract-langpack-eng
             ;;
         opensuse*)
-            sudo zypper install -y qemu qemu-ovmf-x86_64 python3 python3-pip python3-virtualenv curl wget
+            sudo zypper install -y qemu qemu-ovmf-x86_64 python3 python3-pip python3-virtualenv python3-devel curl wget git gcc gcc-c++ make cmake Mesa-libGL1 python3-tk tesseract-ocr tesseract-ocr-traineddata-english
             ;;
         *)
             error "Unsupported distribution: $DISTRO. Please install QEMU manually."
@@ -87,10 +87,71 @@ install_python_deps() {
     fi
     
     # Install dependencies
-    "$SCRIPT_DIR/.vnc_env/bin/pip" install --upgrade pip
-    "$SCRIPT_DIR/.vnc_env/bin/pip" install vncdotool pillow requests python-dotenv
+    "$SCRIPT_DIR/.vnc_env/bin/pip" install --upgrade pip setuptools wheel
+    
+    # Install VNC tools dependencies
+    "$SCRIPT_DIR/.vnc_env/bin/pip" install vncdotool pillow requests python-dotenv numpy opencv-python opencv-python-headless replicate
+    
+    # Install PyTorch (CPU version by default, CUDA if available)
+    if command -v nvidia-smi &> /dev/null; then
+        log "NVIDIA GPU detected, installing CUDA-enabled PyTorch..."
+        "$SCRIPT_DIR/.vnc_env/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+    else
+        log "Installing CPU-only PyTorch..."
+        "$SCRIPT_DIR/.vnc_env/bin/pip" install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+    fi
+    
+    # Install OmniParser requirements if available
+    if [ -f "$SCRIPT_DIR/OmniParser/requirements.txt" ]; then
+        log "Installing OmniParser dependencies..."
+        "$SCRIPT_DIR/.vnc_env/bin/pip" install -r "$SCRIPT_DIR/OmniParser/requirements.txt"
+    else
+        log "Installing core ML dependencies..."
+        "$SCRIPT_DIR/.vnc_env/bin/pip" install easyocr transformers ultralytics paddlepaddle paddleocr
+    fi
     
     log "Python dependencies installed"
+}
+
+# Download OmniParser models if needed
+download_omniparser_models() {
+    log "Checking OmniParser models..."
+    
+    WEIGHTS_DIR="$SCRIPT_DIR/OmniParser/weights"
+    
+    if [ -d "$SCRIPT_DIR/OmniParser" ]; then
+        if [ ! -d "$WEIGHTS_DIR" ]; then
+            warn "OmniParser weights directory not found. Creating it..."
+            mkdir -p "$WEIGHTS_DIR"
+        fi
+        
+        # Check if models exist
+        if [ -z "$(ls -A $WEIGHTS_DIR 2>/dev/null)" ]; then
+            log "Downloading OmniParser models (this may take a while)..."
+            
+            # Download icon detect model
+            if [ ! -f "$WEIGHTS_DIR/icon_detect.pt" ]; then
+                log "Downloading icon detection model..."
+                wget -q --show-progress -O "$WEIGHTS_DIR/icon_detect.pt" \
+                    "https://huggingface.co/microsoft/OmniParser/resolve/main/icon_detect.pt" || \
+                    warn "Failed to download icon detection model"
+            fi
+            
+            # Download icon caption model  
+            if [ ! -f "$WEIGHTS_DIR/icon_caption.pt" ]; then
+                log "Downloading icon caption model..."
+                wget -q --show-progress -O "$WEIGHTS_DIR/icon_caption.pt" \
+                    "https://huggingface.co/microsoft/OmniParser/resolve/main/icon_caption.pt" || \
+                    warn "Failed to download icon caption model"
+            fi
+            
+            log "Model download complete"
+        else
+            log "OmniParser models already present"
+        fi
+    else
+        warn "OmniParser directory not found - skipping model download"
+    fi
 }
 
 # Create VM directories
@@ -184,7 +245,7 @@ qemu-system-x86_64 \\
     -machine q35,accel=kvm \\
     -cpu host \\
     -smp 2 \\
-    -m 2048M \\
+    -m 4096M \\
     -drive file="\$DISK_PATH",if=virtio,format=qcow2 \\
     -cdrom "\$ISO_PATH" \\
     -device virtio-tablet-pci \\
@@ -282,6 +343,17 @@ copy_gemini_settings() {
 }
 EOF
     fi
+    
+    # Create .env file template if it doesn't exist
+    if [ ! -f "$SCRIPT_DIR/.env" ]; then
+        log "Creating .env template for Replicate API fallback..."
+        cat > "$SCRIPT_DIR/.env" << 'EOF'
+# Replicate API Configuration (fallback only - local OmniParser used first)
+# Only needed if local model fails
+REPLICATE_API_TOKEN=your_replicate_api_token_here
+EOF
+        log "Optional: Add Replicate API token to .env file for fallback"
+    fi
 }
 
 # Create usage instructions
@@ -366,6 +438,7 @@ main() {
     detect_distro
     install_qemu
     install_python_deps
+    download_omniparser_models
     setup_directories
     download_puppy
     create_vm_disk
